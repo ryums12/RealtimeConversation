@@ -22,7 +22,7 @@ cp backend/.env.example backend/.env
 
 ```bash
 OPENAI_API_KEY=sk-your-real-key
-PORT=3000
+PORT=3001
 ```
 
 ## Run
@@ -52,7 +52,7 @@ http://localhost:5173
 - `src/main.jsx` - minimal React UI and browser WebRTC setup.
 - `backend/server.js` - Express backend that securely negotiates the Realtime session.
 - `backend/.env.example` - environment variable template.
-- `vite.config.js` - Vite dev server proxy from `/session` to the backend.
+- `vite.config.js` - Vite dev server proxy from `/api/session` to the backend.
 
 ## Notes
 

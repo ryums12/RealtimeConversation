@@ -7,7 +7,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       // Keep the browser talking only to our backend for session negotiation.
-      "/session": "http://localhost:3000",
+      "/api/session": "http://localhost:3001",
     },
   },
 });

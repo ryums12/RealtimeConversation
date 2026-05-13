@@ -13,14 +13,50 @@ dotenv.config({ path: join(__dirname, ".env") });
 const app = express();
 const port = process.env.PORT || 3000;
 
+const sampleAvatarTool = {
+  type: "function",
+  name: "set_avatar_state",
+  description: "Updates the avatar's emotional expression and speaking style.",
+  parameters: {
+    type: "object",
+    properties: {
+      emotion: {
+        type: "string",
+        enum: [
+          "neutral",
+          "happy",
+          "sad",
+          "angry",
+          "surprised",
+          "confused",
+          "encouraging",
+          "serious",
+        ],
+      },
+      intensity: {
+        type: "number",
+        minimum: 0,
+        maximum: 1,
+      },
+      expression: {
+        type: "string",
+      },
+      speakingStyle: {
+        type: "string",
+      },
+    },
+    required: ["emotion", "intensity"],
+  },
+};
+
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/session", async (req, res) => {
-  const { sdp, scenario } = req.body;
+app.post("/api/session", async (req, res) => {
+  const { sdp, scenario, enableSampleTool } = req.body;
 
   if (!process.env.OPENAI_API_KEY) {
     res.status(500).json({ error: "OPENAI_API_KEY is missing in backend/.env" });
@@ -49,6 +85,11 @@ app.post("/session", async (req, res) => {
       },
     },
   };
+
+  if (enableSampleTool) {
+    sessionConfig.tools = [sampleAvatarTool];
+    sessionConfig.tool_choice = "auto";
+  }
 
   const formData = new FormData();
   formData.set("sdp", sdp);
