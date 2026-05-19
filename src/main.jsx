@@ -148,10 +148,8 @@ function App() {
   const eventChannelRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
-  const voiceboxAudioRef = useRef(null);
-  const voiceboxQueueRef = useRef([]);
-  const voiceboxIsPlayingRef = useRef(false);
-  const voiceboxPlaybackResolveRef = useRef(null);
+  const voiceboxSpeakQueueRef = useRef([]);
+  const voiceboxIsSpeakingRef = useRef(false);
   const voiceboxRunIdRef = useRef(0);
   const voiceGenderRef = useRef(voiceGender);
   const enableResponseLogsRef = useRef(enableResponseLogs);
@@ -215,18 +213,8 @@ function App() {
 
   function clearVoiceboxPlayback() {
     voiceboxRunIdRef.current += 1;
-    voiceboxQueueRef.current = [];
-    voiceboxPlaybackResolveRef.current?.();
-    voiceboxPlaybackResolveRef.current = null;
-
-    if (voiceboxAudioRef.current) {
-      voiceboxAudioRef.current.pause();
-      voiceboxAudioRef.current.removeAttribute("src");
-      voiceboxAudioRef.current.load();
-      voiceboxAudioRef.current = null;
-    }
-
-    voiceboxIsPlayingRef.current = false;
+    voiceboxSpeakQueueRef.current = [];
+    voiceboxIsSpeakingRef.current = false;
     setVoiceboxStatus("Voicebox idle");
   }
 
@@ -234,31 +222,31 @@ function App() {
     const trimmedText = text?.trim();
     if (!trimmedText) return;
 
-    voiceboxQueueRef.current.push({
+    voiceboxSpeakQueueRef.current.push({
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: trimmedText,
       voiceGender: voiceGenderRef.current,
     });
-    processVoiceboxQueue();
+    processVoiceboxSpeakQueue();
   }
 
-  async function processVoiceboxQueue() {
-    if (voiceboxIsPlayingRef.current) return;
-    voiceboxIsPlayingRef.current = true;
+  async function processVoiceboxSpeakQueue() {
+    if (voiceboxIsSpeakingRef.current) return;
+    voiceboxIsSpeakingRef.current = true;
     const runId = voiceboxRunIdRef.current;
 
-    while (voiceboxQueueRef.current.length > 0 && runId === voiceboxRunIdRef.current) {
-      const item = voiceboxQueueRef.current.shift();
+    while (voiceboxSpeakQueueRef.current.length > 0 && runId === voiceboxRunIdRef.current) {
+      const item = voiceboxSpeakQueueRef.current.shift();
       setVoiceboxError("");
-      setVoiceboxStatus(`Generating ${item.voiceGender} Voicebox audio...`);
-      appendLog("voicebox.generate.request", {
+      setVoiceboxStatus(`Sending ${item.voiceGender} text to Voicebox /speak...`);
+      appendLog("voicebox.speak.request", {
         voiceGender: item.voiceGender,
         language: "ko",
         text: item.text,
       });
 
       try {
-        const generateResponse = await fetch("/api/voicebox/generate", {
+        const speakResponse = await fetch("/api/voicebox/speak", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -270,7 +258,7 @@ function App() {
           }),
         });
 
-        const responseText = await generateResponse.text();
+        const responseText = await speakResponse.text();
         let responseBody = {};
 
         try {
@@ -281,29 +269,21 @@ function App() {
 
         if (runId !== voiceboxRunIdRef.current) return;
 
-        if (!generateResponse.ok) {
+        if (!speakResponse.ok) {
           throw new Error(
             responseBody.error ||
-              `Voicebox generation failed with HTTP ${generateResponse.status}: ${responseText}`
+              `Voicebox /speak failed with HTTP ${speakResponse.status}: ${responseText}`
           );
         }
 
-        const generationId = responseBody.generationId;
-        if (!generationId) {
-          throw new Error("Voicebox generation succeeded but did not return a generation ID.");
-        }
-
-        appendLog("voicebox.generate.success", {
-          generationId,
+        appendLog("voicebox.speak.success", {
           voiceGender: item.voiceGender,
-          profileId: responseBody.profileId,
+          maskedProfileId: responseBody.maskedProfileId,
         });
-
-        setVoiceboxStatus(`Playing ${item.voiceGender} Voicebox audio...`);
-        await playVoiceboxAudio(generationId, runId);
+        setVoiceboxStatus("Voicebox /speak request completed.");
       } catch (error) {
         if (runId !== voiceboxRunIdRef.current) return;
-        const message = error.message || "Voicebox playback failed.";
+        const message = error.message || "Voicebox /speak failed.";
         setVoiceboxError(message);
         setVoiceboxStatus("Voicebox error");
         appendLog("voicebox.error", { message });
@@ -311,29 +291,9 @@ function App() {
     }
 
     if (runId === voiceboxRunIdRef.current) {
-      voiceboxIsPlayingRef.current = false;
+      voiceboxIsSpeakingRef.current = false;
       setVoiceboxStatus("Voicebox idle");
     }
-  }
-
-  async function playVoiceboxAudio(generationId, runId) {
-    appendLog("voicebox.audio.start", { generationId });
-
-    await new Promise((resolve, reject) => {
-      const audio = new Audio(`/api/voicebox/audio/${encodeURIComponent(generationId)}`);
-      voiceboxAudioRef.current = audio;
-      voiceboxPlaybackResolveRef.current = resolve;
-
-      audio.onended = resolve;
-      audio.onerror = () => reject(new Error("Voicebox audio playback failed."));
-      audio.play().catch(reject);
-    });
-
-    if (runId === voiceboxRunIdRef.current) {
-      appendLog("voicebox.audio.end", { generationId });
-    }
-    voiceboxPlaybackResolveRef.current = null;
-    voiceboxAudioRef.current = null;
   }
 
   function upsertToolCall(callId, updater) {

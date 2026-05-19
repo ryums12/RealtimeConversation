@@ -2,7 +2,6 @@ import dotenv from "dotenv";
 import express from "express";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import { Readable } from "stream";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -13,11 +12,17 @@ dotenv.config({ path: join(__dirname, ".env") });
 
 const app = express();
 const port = process.env.PORT || 3000;
-const VOICEBOX_BASE_URL = process.env.VOICEBOX_BASE_URL || "http://127.0.0.1:17493";
+const VOICEBOX_BASE_URL = process.env.VOICEBOX_BASE_URL;
 const VOICEBOX_PROFILE_IDS = {
-  male: "b482df36-2aef-4fac-8995-f497fd60f5f7",
-  female: "19d52563-b6ba-4f27-aa32-f19d7d8bc1ac",
+  male: process.env.VOICEBOX_MALE_PROFILE_ID,
+  female: process.env.VOICEBOX_FEMALE_PROFILE_ID,
 };
+const allowedVoiceGenders = ["male", "female"];
+
+function maskProfileId(profileId) {
+  if (!profileId || profileId.length < 12) return "configured";
+  return `${profileId.slice(0, 4)}...${profileId.slice(-4)}`;
+}
 
 const sampleAvatarTool = {
   type: "function",
@@ -61,29 +66,43 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.post("/api/voicebox/generate", async (req, res) => {
+app.post("/api/voicebox/speak", async (req, res) => {
   const { text, voiceGender, language = "ko" } = req.body;
-  const profileId = VOICEBOX_PROFILE_IDS[voiceGender];
 
-  if (!profileId) {
-    res.status(400).json({ error: "Invalid voiceGender. Expected male or female." });
+  if (!VOICEBOX_BASE_URL) {
+    res.status(500).json({ error: "Missing VOICEBOX_BASE_URL. Please configure it in the .env file." });
     return;
   }
 
-  if (!text || typeof text !== "string") {
-    res.status(400).json({ error: "Missing text for Voicebox generation." });
+  if (!allowedVoiceGenders.includes(voiceGender)) {
+    res.status(400).json({ error: "Invalid voice gender." });
+    return;
+  }
+
+  const profileId = VOICEBOX_PROFILE_IDS[voiceGender];
+
+  if (!profileId) {
+    res.status(500).json({
+      error:
+        "Missing Voicebox profile ID. Please configure VOICEBOX_MALE_PROFILE_ID or VOICEBOX_FEMALE_PROFILE_ID in the .env file.",
+    });
+    return;
+  }
+
+  if (!text || typeof text !== "string" || !text.trim()) {
+    res.status(400).json({ error: "Missing text for Voicebox speak." });
     return;
   }
 
   try {
-    const voiceboxResponse = await fetch(`${VOICEBOX_BASE_URL}/generate`, {
+    const voiceboxResponse = await fetch(`${VOICEBOX_BASE_URL}/speak`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        profile_id: profileId,
-        text,
+        text: text.trim(),
+        profile: profileId,
         language,
       }),
     });
@@ -92,77 +111,23 @@ app.post("/api/voicebox/generate", async (req, res) => {
 
     if (!voiceboxResponse.ok) {
       res.status(voiceboxResponse.status).json({
-        error: "Voicebox generation failed.",
+        error: `Voicebox /speak failed with HTTP ${voiceboxResponse.status}.`,
         status: voiceboxResponse.status,
         body: responseBody,
       });
       return;
     }
 
-    let parsedBody = {};
-    try {
-      parsedBody = responseBody ? JSON.parse(responseBody) : {};
-    } catch {
-      parsedBody = { raw: responseBody };
-    }
-
-    const generationId =
-      parsedBody.generationId ||
-      parsedBody.generation_id ||
-      parsedBody.id ||
-      parsedBody.audio_id;
-
-    if (!generationId) {
-      res.status(502).json({
-        error: "Voicebox generation response did not include a generation ID.",
-        body: parsedBody,
-      });
-      return;
-    }
-
     res.json({
-      generationId,
+      ok: true,
       voiceGender,
-      profileId,
-      response: parsedBody,
+      maskedProfileId: maskProfileId(profileId),
+      response: responseBody,
     });
   } catch (error) {
     res.status(503).json({
       error:
-        "Voicebox server is not reachable. Please check that Voicebox is running at http://127.0.0.1:17493.",
-      details: error.message,
-    });
-  }
-});
-
-app.get("/api/voicebox/audio/:id", async (req, res) => {
-  try {
-    const audioResponse = await fetch(
-      `${VOICEBOX_BASE_URL}/audio/${encodeURIComponent(req.params.id)}`
-    );
-
-    if (!audioResponse.ok) {
-      const errorBody = await audioResponse.text();
-      res.status(audioResponse.status).json({
-        error: "Voicebox audio fetch failed.",
-        status: audioResponse.status,
-        body: errorBody,
-      });
-      return;
-    }
-
-    res.status(audioResponse.status);
-    res.setHeader("Content-Type", audioResponse.headers.get("content-type") || "audio/mpeg");
-    const contentLength = audioResponse.headers.get("content-length");
-    if (contentLength) {
-      res.setHeader("Content-Length", contentLength);
-    }
-
-    Readable.fromWeb(audioResponse.body).pipe(res);
-  } catch (error) {
-    res.status(503).json({
-      error:
-        "Voicebox server is not reachable. Please check that Voicebox is running at http://127.0.0.1:17493.",
+        `Voicebox server is not reachable. Please check that Voicebox is running at ${VOICEBOX_BASE_URL}.`,
       details: error.message,
     });
   }
