@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       // Keep the browser talking only to our backend for session negotiation.
       "/api/session": "http://localhost:3001",
+      "/api/voicebox": "http://localhost:3001",
     },
   },
 });

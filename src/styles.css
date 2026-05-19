@@ -13,7 +13,8 @@ body {
 
 button,
 textarea,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -72,6 +73,28 @@ textarea {
   font-weight: 600;
 }
 
+.settings-row {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-row select {
+  min-height: 40px;
+  width: min(260px, 100%);
+  padding: 0 10px;
+  border: 1px solid #c9d3d8;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #172026;
+}
+
+.settings-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+}
+
 button {
   min-height: 40px;
   padding: 0 14px;
@@ -102,6 +125,15 @@ button + button {
 .status {
   margin: 0;
   color: #3e5059;
+}
+
+.error-message {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #f0b7b0;
+  border-radius: 6px;
+  background: #fff4f2;
+  color: #8a2319;
 }
 
 .section-heading {
