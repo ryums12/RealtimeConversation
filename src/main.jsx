@@ -228,7 +228,7 @@ function CopyButton({ value, label = "Copy", disabled = false }) {
 
 function App() {
   const [scenario, setScenario] = useState(
-    "You are a friendly English conversation partner. Keep replies short and ask one question at a time."
+    "당신은 사용자의 이웃집 사람이다. 평범한 사람을 연기하되, 사용자가 하는 말에 따라서 감정 변화를 드러내도록 한다."
   );
   const [enableSampleTool, setEnableSampleTool] = useState(false);
   const [voiceGender, setVoiceGender] = useState("male");
@@ -717,14 +717,12 @@ function App() {
     const audio = new Audio(nextAudio.url);
     humeCurrentAudioRef.current = audio;
     updateHumeDebug({ playbackStatus: "playing" });
-    appendLog("hume.playback.start", {});
 
     audio.onended = () => {
       URL.revokeObjectURL(nextAudio.url);
       humeAudioPlayingRef.current = false;
       humeCurrentAudioRef.current = null;
       updateHumeDebug({ playbackStatus: "ended" });
-      appendLog("hume.playback.end", {});
       processHumeAudioQueue();
     };
 
@@ -1113,39 +1111,6 @@ function App() {
 
         <section className="debug-section">
           <div className="section-heading">
-            <h2>Turn Detection</h2>
-          </div>
-
-          <dl className="metadata-grid">
-            <div>
-              <dt>turn_detection.type</dt>
-              <dd>{turnDetectionSettings.type || "not configured"}</dd>
-            </div>
-            <div>
-              <dt>silence_duration_ms</dt>
-              <dd>{turnDetectionSettings.silence_duration_ms ?? "n/a"}</dd>
-            </div>
-            <div>
-              <dt>prefix_padding_ms</dt>
-              <dd>{turnDetectionSettings.prefix_padding_ms ?? "n/a"}</dd>
-            </div>
-            <div>
-              <dt>threshold</dt>
-              <dd>{turnDetectionSettings.threshold ?? "n/a"}</dd>
-            </div>
-            <div>
-              <dt>create_response</dt>
-              <dd>{String(Boolean(turnDetectionSettings.create_response))}</dd>
-            </div>
-            <div>
-              <dt>semantic_vad eagerness</dt>
-              <dd>{turnDetectionSettings.eagerness || "n/a"}</dd>
-            </div>
-          </dl>
-        </section>
-
-        <section className="debug-section">
-          <div className="section-heading">
             <h2>AI Speech Text</h2>
             <CopyButton value={finalSpeechText || currentSpeechText} label="Copy latest" />
           </div>
@@ -1178,33 +1143,6 @@ function App() {
           <div className="section-heading">
             <h2>Hume Octave TTS</h2>
           </div>
-
-          <dl className="metadata-grid hume-metadata-grid">
-            <div>
-              <dt>Voice gender</dt>
-              <dd>{humeDebug.selectedVoiceGender}</dd>
-            </div>
-            <div>
-              <dt>Masked voice ID</dt>
-              <dd>{humeDebug.maskedVoiceId}</dd>
-            </div>
-            <div>
-              <dt>Connection</dt>
-              <dd>{humeDebug.connectionStatus}</dd>
-            </div>
-            <div>
-              <dt>Streaming</dt>
-              <dd>{humeDebug.streamingStatus}</dd>
-            </div>
-            <div>
-              <dt>Playback</dt>
-              <dd>{humeDebug.playbackStatus}</dd>
-            </div>
-            <div>
-              <dt>Lip-sync placeholder</dt>
-              <dd>{humeDebug.hasLipSyncPlaceholder ? "available" : "missing"}</dd>
-            </div>
-          </dl>
 
           <div className="speech-grid">
             <div>
