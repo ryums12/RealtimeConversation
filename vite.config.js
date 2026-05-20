@@ -6,9 +6,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Keep the browser talking only to our backend for session negotiation.
+      // Keep the browser talking only to our backend for session negotiation and Hume proxying.
       "/api/session": "http://localhost:3001",
-      "/api/voicebox": "http://localhost:3001",
+      "/api/hume": {
+        target: "http://localhost:3001",
+        ws: true,
+      },
     },
   },
 });

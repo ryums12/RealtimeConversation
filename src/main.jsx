@@ -8,6 +8,15 @@ const VOICE_OPTIONS = [
   { value: "male", label: "Male" },
   { value: "female", label: "Female" },
 ];
+const HUME_LIP_SYNC_PLACEHOLDER = {
+  enabled: false,
+  source: "hume_octave",
+  mode: "placeholder",
+  timestampsAvailable: false,
+  wordTimestamps: [],
+  phonemeTimestamps: [],
+  visemes: [],
+};
 
 function safeJsonParse(rawString) {
   if (!rawString) {
@@ -31,6 +40,72 @@ function getJsonParseStatus(toolCall) {
 
 function getTimestamp() {
   return new Date().toISOString();
+}
+
+function buildHumeActingInstruction({
+  emotion,
+  intensity,
+  speakingStyle,
+} = {}) {
+  const normalizedIntensity = Number.isFinite(Number(intensity))
+    ? Math.max(0, Math.min(1, Number(intensity)))
+    : null;
+  const intensityText =
+    normalizedIntensity === null
+      ? "natural"
+      : normalizedIntensity >= 0.75
+        ? "high"
+        : normalizedIntensity >= 0.4
+          ? "moderate"
+          : "gentle";
+  const style = typeof speakingStyle === "string" && speakingStyle.trim()
+    ? speakingStyle.trim()
+    : "clear and conversational";
+  const mood = typeof emotion === "string" && emotion.trim() ? emotion.trim() : "neutral";
+
+  return `Speak in a ${style} tone with ${intensityText} ${mood} expression.`;
+}
+
+function getHumeSocketUrl() {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}/api/hume/tts-stream`;
+}
+
+function extractCompleteSentenceChunks(buffer) {
+  const chunks = [];
+  let startIndex = 0;
+
+  for (let index = 0; index < buffer.length; index += 1) {
+    const char = buffer[index];
+    if (char === "." || char === "?" || char === "!" || char === "\n") {
+      const chunk = buffer.slice(startIndex, index + 1).trim();
+      if (chunk) chunks.push(chunk);
+      startIndex = index + 1;
+    }
+  }
+
+  return {
+    chunks,
+    remaining: buffer.slice(startIndex),
+  };
+}
+
+function splitSpeechIntoChunks(text) {
+  const { chunks, remaining } = extractCompleteSentenceChunks(text || "");
+  const tail = remaining.trim();
+  return tail ? [...chunks, tail] : chunks;
+}
+
+function base64ToBlobUrl(base64Audio, audioFormat = "mp3") {
+  const binary = window.atob(base64Audio);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  const mimeType = audioFormat === "wav" ? "audio/wav" : "audio/mpeg";
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
 }
 
 function compactEventPreview(event) {
@@ -135,8 +210,20 @@ function App() {
   const [enableResponseLogs, setEnableResponseLogs] = useState(true);
   const [showLogPanel, setShowLogPanel] = useState(true);
   const [status, setStatus] = useState("Idle");
-  const [voiceboxStatus, setVoiceboxStatus] = useState("Voicebox idle");
-  const [voiceboxError, setVoiceboxError] = useState("");
+  const [humeStatus, setHumeStatus] = useState("Hume Octave idle");
+  const [humeError, setHumeError] = useState("");
+  const [humeDebug, setHumeDebug] = useState({
+    selectedVoiceGender: "male",
+    maskedVoiceId: "Not resolved yet",
+    connectionStatus: "disconnected",
+    streamingStatus: "idle",
+    latestTextChunk: "",
+    latestActingInstruction: "",
+    latestError: "",
+    playbackStatus: "idle",
+    hasLipSyncPlaceholder: true,
+  });
+  const [lipSyncPlaceholder, setLipSyncPlaceholder] = useState(HUME_LIP_SYNC_PLACEHOLDER);
   const [isRunning, setIsRunning] = useState(false);
   const [currentSpeechText, setCurrentSpeechText] = useState("");
   const [finalSpeechText, setFinalSpeechText] = useState("");
@@ -148,16 +235,27 @@ function App() {
   const eventChannelRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
-  const voiceboxSpeakQueueRef = useRef([]);
-  const voiceboxIsSpeakingRef = useRef(false);
-  const voiceboxRunIdRef = useRef(0);
+  const humeSocketRef = useRef(null);
+  const humeMessageQueueRef = useRef([]);
+  const humeRunIdRef = useRef(0);
+  const humeAudioQueueRef = useRef([]);
+  const humeAudioPlayingRef = useRef(false);
+  const humeCurrentAudioRef = useRef(null);
   const voiceGenderRef = useRef(voiceGender);
   const enableResponseLogsRef = useRef(enableResponseLogs);
   const currentSpeechBufferRef = useRef("");
+  const sentenceSpeechBufferRef = useRef("");
+  const sentSentenceChunksRef = useRef(new Set());
   const lastFinalSpeechRef = useRef("");
+  const latestAvatarStateRef = useRef({});
 
   useEffect(() => {
     voiceGenderRef.current = voiceGender;
+    setHumeDebug((debug) => ({
+      ...debug,
+      selectedVoiceGender: voiceGender,
+    }));
+    appendLog("hume.voice.selected", { voiceGender });
   }, [voiceGender]);
 
   useEffect(() => {
@@ -187,6 +285,13 @@ function App() {
 
     currentSpeechBufferRef.current += deltaOrText;
     setCurrentSpeechText(currentSpeechBufferRef.current);
+    appendLog("openai.realtime.text_delta", { text: deltaOrText });
+
+    sentenceSpeechBufferRef.current += deltaOrText;
+    const { chunks, remaining } = extractCompleteSentenceChunks(sentenceSpeechBufferRef.current);
+    sentenceSpeechBufferRef.current = remaining;
+
+    chunks.forEach((chunk) => enqueueHumeSpeech(chunk, "sentence_delta"));
   }
 
   function finalizeSpeechText(text) {
@@ -198,7 +303,13 @@ function App() {
     setCurrentSpeechText("");
     setFinalSpeechText(completedText);
     appendLog("assistant.speech.final", { text: completedText });
-    enqueueVoiceboxSpeech(completedText);
+
+    const finalChunks = sentSentenceChunksRef.current.size > 0
+      ? [sentenceSpeechBufferRef.current.trim()].filter(Boolean)
+      : splitSpeechIntoChunks(completedText);
+    sentenceSpeechBufferRef.current = "";
+    finalChunks.forEach((chunk) => enqueueHumeSpeech(chunk, "final_text"));
+
     setSpeechHistory((items) =>
       [
         {
@@ -211,89 +322,309 @@ function App() {
     );
   }
 
-  function clearVoiceboxPlayback() {
-    voiceboxRunIdRef.current += 1;
-    voiceboxSpeakQueueRef.current = [];
-    voiceboxIsSpeakingRef.current = false;
-    setVoiceboxStatus("Voicebox idle");
+  function updateHumeDebug(patch) {
+    setHumeDebug((debug) => ({
+      ...debug,
+      ...patch,
+      hasLipSyncPlaceholder: true,
+    }));
   }
 
-  function enqueueVoiceboxSpeech(text) {
+  function clearHumePlayback() {
+    humeRunIdRef.current += 1;
+    humeMessageQueueRef.current = [];
+    humeAudioQueueRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+    humeAudioQueueRef.current = [];
+    humeAudioPlayingRef.current = false;
+    humeCurrentAudioRef.current?.pause();
+    humeCurrentAudioRef.current = null;
+
+    if (humeSocketRef.current?.readyState === WebSocket.OPEN) {
+      humeSocketRef.current.send(JSON.stringify({ type: "close" }));
+      humeSocketRef.current.close();
+    }
+    humeSocketRef.current = null;
+
+    setHumeStatus("Hume Octave idle");
+    updateHumeDebug({
+      connectionStatus: "disconnected",
+      streamingStatus: "idle",
+      playbackStatus: "idle",
+    });
+  }
+
+  function enqueueHumeSpeech(text, source) {
     const trimmedText = text?.trim();
     if (!trimmedText) return;
+    if (sentSentenceChunksRef.current.has(trimmedText)) return;
+    sentSentenceChunksRef.current.add(trimmedText);
 
-    voiceboxSpeakQueueRef.current.push({
+    const emotionState = latestAvatarStateRef.current || {};
+    const actingInstruction = buildHumeActingInstruction(emotionState);
+    const item = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: trimmedText,
       voiceGender: voiceGenderRef.current,
+      emotion: emotionState.emotion,
+      intensity: emotionState.intensity,
+      speakingStyle: emotionState.speakingStyle,
+      actingInstruction,
+      source,
+      lipSync: {
+        enabled: false,
+        mode: "placeholder",
+      },
+    };
+
+    humeMessageQueueRef.current.push(item);
+    appendLog("hume.sentence_chunk.queued", {
+      voiceGender: item.voiceGender,
+      source,
+      text: item.text,
+      actingInstruction,
     });
-    processVoiceboxSpeakQueue();
+    sendQueuedHumeMessages();
   }
 
-  async function processVoiceboxSpeakQueue() {
-    if (voiceboxIsSpeakingRef.current) return;
-    voiceboxIsSpeakingRef.current = true;
-    const runId = voiceboxRunIdRef.current;
+  function connectHumeSocket() {
+    const existingSocket = humeSocketRef.current;
+    if (existingSocket?.readyState === WebSocket.OPEN) return existingSocket;
+    if (existingSocket?.readyState === WebSocket.CONNECTING) return existingSocket;
 
-    while (voiceboxSpeakQueueRef.current.length > 0 && runId === voiceboxRunIdRef.current) {
-      const item = voiceboxSpeakQueueRef.current.shift();
-      setVoiceboxError("");
-      setVoiceboxStatus(`Sending ${item.voiceGender} text to Voicebox /speak...`);
-      appendLog("voicebox.speak.request", {
-        voiceGender: item.voiceGender,
-        language: "ko",
-        text: item.text,
+    setHumeError("");
+    setHumeStatus("Connecting to Hume Octave...");
+    updateHumeDebug({
+      connectionStatus: "connecting",
+      streamingStatus: "connecting",
+      latestError: "",
+    });
+
+    const socket = new WebSocket(getHumeSocketUrl());
+    humeSocketRef.current = socket;
+
+    socket.onopen = () => {
+      setHumeStatus("Hume Octave connected");
+      updateHumeDebug({
+        connectionStatus: "connected",
+        streamingStatus: "ready",
       });
+      appendLog("hume.websocket.open", { endpoint: "/api/hume/tts-stream" });
+      sendQueuedHumeMessages();
+    };
 
+    socket.onclose = (event) => {
+      setHumeStatus("Hume Octave disconnected");
+      updateHumeDebug({
+        connectionStatus: "disconnected",
+        streamingStatus: "idle",
+      });
+      appendLog("hume.websocket.closed", { code: event.code, reason: event.reason });
+    };
+
+    socket.onerror = () => {
+      const message = "Hume Octave proxy WebSocket failed.";
+      setHumeError(message);
+      setHumeStatus("Hume Octave error");
+      updateHumeDebug({
+        connectionStatus: "error",
+        streamingStatus: "error",
+        latestError: message,
+      });
+      appendLog("hume.error", { message });
+    };
+
+    socket.onmessage = (messageEvent) => {
       try {
-        const speakResponse = await fetch("/api/voicebox/speak", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            text: item.text,
-            voiceGender: item.voiceGender,
-            language: "ko",
-          }),
-        });
-
-        const responseText = await speakResponse.text();
-        let responseBody = {};
-
-        try {
-          responseBody = responseText ? JSON.parse(responseText) : {};
-        } catch {
-          responseBody = { body: responseText };
-        }
-
-        if (runId !== voiceboxRunIdRef.current) return;
-
-        if (!speakResponse.ok) {
-          throw new Error(
-            responseBody.error ||
-              `Voicebox /speak failed with HTTP ${speakResponse.status}: ${responseText}`
-          );
-        }
-
-        appendLog("voicebox.speak.success", {
-          voiceGender: item.voiceGender,
-          maskedProfileId: responseBody.maskedProfileId,
-        });
-        setVoiceboxStatus("Voicebox /speak request completed.");
+        handleHumeMessage(JSON.parse(messageEvent.data));
       } catch (error) {
-        if (runId !== voiceboxRunIdRef.current) return;
-        const message = error.message || "Voicebox /speak failed.";
-        setVoiceboxError(message);
-        setVoiceboxStatus("Voicebox error");
-        appendLog("voicebox.error", { message });
+        const message = error.message || "Could not parse Hume proxy message.";
+        setHumeError(message);
+        updateHumeDebug({ latestError: message });
+        appendLog("hume.error", { message, raw: messageEvent.data });
       }
+    };
+
+    return socket;
+  }
+
+  function sendQueuedHumeMessages() {
+    const socket = connectHumeSocket();
+    if (socket.readyState !== WebSocket.OPEN) return;
+
+    while (humeMessageQueueRef.current.length > 0) {
+      const item = humeMessageQueueRef.current.shift();
+      socket.send(JSON.stringify({
+        type: "speak",
+        text: item.text,
+        voiceGender: item.voiceGender,
+        emotion: item.emotion,
+        intensity: item.intensity,
+        speakingStyle: item.speakingStyle,
+        lipSync: item.lipSync,
+      }));
+      setHumeStatus(`Streaming ${item.voiceGender} text to Hume Octave...`);
+      updateHumeDebug({
+        selectedVoiceGender: item.voiceGender,
+        streamingStatus: "sending_text",
+        latestTextChunk: item.text,
+        latestActingInstruction: item.actingInstruction,
+      });
+      appendLog("hume.text.sent", {
+        voiceGender: item.voiceGender,
+        text: item.text,
+        actingInstruction: item.actingInstruction,
+      });
+    }
+  }
+
+  function handleHumeMessage(message) {
+    if (message.type === "hume.connection.open") {
+      setHumeStatus("Hume Octave connected");
+      updateHumeDebug({
+        connectionStatus: "connected",
+        streamingStatus: "ready",
+      });
+      appendLog("hume.connection.opened", {});
+      return;
     }
 
-    if (runId === voiceboxRunIdRef.current) {
-      voiceboxIsSpeakingRef.current = false;
-      setVoiceboxStatus("Voicebox idle");
+    if (message.type === "hume.request.accepted") {
+      setHumeStatus("Hume Octave generating audio...");
+      setHumeError("");
+      setLipSyncPlaceholder(message.lipSync || HUME_LIP_SYNC_PLACEHOLDER);
+      updateHumeDebug({
+        selectedVoiceGender: message.voiceGender,
+        maskedVoiceId: message.maskedVoiceId || "configured",
+        streamingStatus: "generating",
+        latestTextChunk: message.text || "",
+        latestActingInstruction: message.actingInstruction || "",
+        latestError: "",
+      });
+      appendLog("hume.request.accepted", {
+        voiceGender: message.voiceGender,
+        maskedVoiceId: message.maskedVoiceId,
+        text: message.text,
+        actingInstruction: message.actingInstruction,
+      });
+      return;
     }
+
+    if (message.type === "hume.audio") {
+      setHumeStatus("Hume Octave audio received");
+      setLipSyncPlaceholder(message.lipSync || HUME_LIP_SYNC_PLACEHOLDER);
+      updateHumeDebug({
+        streamingStatus: message.isLastChunk ? "last_audio_chunk" : "receiving_audio",
+      });
+      appendLog("hume.audio.chunk", {
+        chunkIndex: message.chunkIndex,
+        isLastChunk: message.isLastChunk,
+        audioFormat: message.audioFormat,
+        text: message.text,
+      });
+      enqueueHumeAudioChunk(message.audio, message.audioFormat);
+      return;
+    }
+
+    if (message.type === "hume.metadata") {
+      if (message.lipSync) {
+        setLipSyncPlaceholder(message.lipSync);
+        appendLog("hume.lip_sync.placeholder", message.lipSync);
+      }
+      appendLog("hume.metadata", message.metadata || message.raw || {});
+      return;
+    }
+
+    if (message.type === "hume.error") {
+      const errorMessage = message.error || "Hume Octave error.";
+      setHumeError(errorMessage);
+      setHumeStatus("Hume Octave error");
+      updateHumeDebug({
+        streamingStatus: "error",
+        latestError: errorMessage,
+      });
+      appendLog("hume.error", { message: errorMessage, status: message.status });
+      return;
+    }
+
+    if (message.type === "hume.connection.closed") {
+      updateHumeDebug({
+        connectionStatus: "disconnected",
+        streamingStatus: "idle",
+      });
+      appendLog("hume.connection.closed", {
+        code: message.code,
+        reason: message.reason,
+      });
+    }
+  }
+
+  function enqueueHumeAudioChunk(base64Audio, audioFormat) {
+    if (!base64Audio) return;
+
+    try {
+      const url = base64ToBlobUrl(base64Audio, audioFormat);
+      humeAudioQueueRef.current.push({ url });
+      processHumeAudioQueue();
+    } catch (error) {
+      const message = error.message || "Could not decode Hume audio chunk.";
+      setHumeError(message);
+      updateHumeDebug({
+        playbackStatus: "error",
+        latestError: message,
+      });
+      appendLog("hume.error", { message });
+    }
+  }
+
+  function processHumeAudioQueue() {
+    if (humeAudioPlayingRef.current) return;
+    const nextAudio = humeAudioQueueRef.current.shift();
+    if (!nextAudio) {
+      updateHumeDebug({ playbackStatus: "idle" });
+      return;
+    }
+
+    humeAudioPlayingRef.current = true;
+    const audio = new Audio(nextAudio.url);
+    humeCurrentAudioRef.current = audio;
+    updateHumeDebug({ playbackStatus: "playing" });
+    appendLog("hume.playback.start", {});
+
+    audio.onended = () => {
+      URL.revokeObjectURL(nextAudio.url);
+      humeAudioPlayingRef.current = false;
+      humeCurrentAudioRef.current = null;
+      updateHumeDebug({ playbackStatus: "ended" });
+      appendLog("hume.playback.end", {});
+      processHumeAudioQueue();
+    };
+
+    audio.onerror = () => {
+      URL.revokeObjectURL(nextAudio.url);
+      humeAudioPlayingRef.current = false;
+      humeCurrentAudioRef.current = null;
+      const message = "Browser could not play a Hume audio chunk.";
+      setHumeError(message);
+      updateHumeDebug({
+        playbackStatus: "error",
+        latestError: message,
+      });
+      appendLog("hume.error", { message });
+      processHumeAudioQueue();
+    };
+
+    audio.play().catch((error) => {
+      URL.revokeObjectURL(nextAudio.url);
+      humeAudioPlayingRef.current = false;
+      humeCurrentAudioRef.current = null;
+      const message = error.message || "Browser blocked Hume audio playback.";
+      setHumeError(message);
+      updateHumeDebug({
+        playbackStatus: "error",
+        latestError: message,
+      });
+      appendLog("hume.error", { message });
+    });
   }
 
   function upsertToolCall(callId, updater) {
@@ -345,6 +676,23 @@ function App() {
         typeof completedArguments === "string" ? completedArguments : call.rawArguments;
       const parsed = safeJsonParse(rawArguments);
 
+      if (!parsed.error && parsed.parsed && typeof parsed.parsed === "object") {
+        latestAvatarStateRef.current = parsed.parsed;
+        const nextLipSync = {
+          ...HUME_LIP_SYNC_PLACEHOLDER,
+          ...(parsed.parsed.lipSync || {}),
+          enabled: false,
+          source: "hume_octave",
+          mode: "placeholder",
+        };
+        setLipSyncPlaceholder(nextLipSync);
+        appendLog("tool.function_call.json", {
+          name: functionName && functionName !== "unknown" ? functionName : call.name,
+          arguments: parsed.parsed,
+        });
+        appendLog("hume.lip_sync.placeholder", nextLipSync);
+      }
+
       return {
         ...call,
         name: functionName && functionName !== "unknown" ? functionName : call.name,
@@ -372,6 +720,8 @@ function App() {
 
     if (event.type === "response.created") {
       currentSpeechBufferRef.current = "";
+      sentenceSpeechBufferRef.current = "";
+      sentSentenceChunksRef.current = new Set();
       setCurrentSpeechText("");
     }
 
@@ -434,7 +784,7 @@ function App() {
       peerConnection.ontrack = (event) => {
         event.track.enabled = false;
         appendLog("debug.realtime_audio_track_ignored", {
-          message: "Realtime audio output is ignored so only Voicebox audio is played.",
+          message: "Realtime audio output is ignored so only Hume Octave audio is played.",
         });
       };
 
@@ -538,7 +888,7 @@ function App() {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
-    clearVoiceboxPlayback();
+    clearHumePlayback();
 
     setIsRunning(false);
     setStatus("Idle");
@@ -610,8 +960,8 @@ function App() {
         </div>
 
         <p className="status">Status: {status}</p>
-        <p className="status">TTS: {voiceboxStatus}</p>
-        {voiceboxError && <p className="error-message">{voiceboxError}</p>}
+        <p className="status">TTS: {humeStatus}</p>
+        {humeError && <p className="error-message">{humeError}</p>}
       </section>
 
       {showLogPanel && <section className="debug-panel" aria-label="Debug Inspector">
@@ -650,6 +1000,54 @@ function App() {
               ))}
             </div>
           )}
+        </section>
+
+        <section className="debug-section">
+          <div className="section-heading">
+            <h2>Hume Octave TTS</h2>
+          </div>
+
+          <dl className="metadata-grid hume-metadata-grid">
+            <div>
+              <dt>Voice gender</dt>
+              <dd>{humeDebug.selectedVoiceGender}</dd>
+            </div>
+            <div>
+              <dt>Masked voice ID</dt>
+              <dd>{humeDebug.maskedVoiceId}</dd>
+            </div>
+            <div>
+              <dt>Connection</dt>
+              <dd>{humeDebug.connectionStatus}</dd>
+            </div>
+            <div>
+              <dt>Streaming</dt>
+              <dd>{humeDebug.streamingStatus}</dd>
+            </div>
+            <div>
+              <dt>Playback</dt>
+              <dd>{humeDebug.playbackStatus}</dd>
+            </div>
+            <div>
+              <dt>Lip-sync placeholder</dt>
+              <dd>{humeDebug.hasLipSyncPlaceholder ? "available" : "missing"}</dd>
+            </div>
+          </dl>
+
+          <div className="speech-grid">
+            <div>
+              <h3>Latest text sent</h3>
+              <pre className="text-block">{humeDebug.latestTextChunk || "No text sent to Hume yet."}</pre>
+            </div>
+            <div>
+              <h3>Latest acting instruction</h3>
+              <pre className="text-block">
+                {humeDebug.latestActingInstruction || "No acting instruction sent yet."}
+              </pre>
+            </div>
+          </div>
+
+          {humeDebug.latestError && <p className="error-message">{humeDebug.latestError}</p>}
         </section>
 
         <section className="debug-section">
@@ -713,6 +1111,14 @@ function App() {
               })}
             </div>
           )}
+        </section>
+
+        <section className="debug-section">
+          <div className="section-heading">
+            <h2>Lip Sync Placeholder JSON</h2>
+            <CopyButton value={JSON.stringify(lipSyncPlaceholder, null, 2)} />
+          </div>
+          <pre className="code-block">{JSON.stringify(lipSyncPlaceholder, null, 2)}</pre>
         </section>
 
         <section className="debug-section">
