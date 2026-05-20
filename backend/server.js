@@ -21,6 +21,12 @@ const HUME_VOICE_IDS = {
   female: process.env.HUME_FEMALE_VOICE_ID,
 };
 const allowedVoiceGenders = ["male", "female"];
+const realtimeTurnDetection = {
+  type: "semantic_vad",
+  eagerness: "low",
+  create_response: true,
+  interrupt_response: false,
+};
 
 function maskVoiceId(voiceId) {
   if (!voiceId || voiceId.length < 10) return "configured";
@@ -177,6 +183,11 @@ app.post("/api/session", async (req, res) => {
     type: "realtime",
     model: "gpt-realtime",
     instructions,
+    audio: {
+      input: {
+        turn_detection: realtimeTurnDetection,
+      },
+    },
     output_modalities: ["text"],
   };
 
@@ -206,7 +217,10 @@ app.post("/api/session", async (req, res) => {
       return;
     }
 
-    res.type("application/sdp").send(answerSdp);
+    res
+      .set("X-Realtime-Turn-Detection", encodeURIComponent(JSON.stringify(realtimeTurnDetection)))
+      .type("application/sdp")
+      .send(answerSdp);
   } catch (error) {
     console.error("Realtime session negotiation failed:", error);
     res.status(500).json({ error: "Failed to create realtime session" });

@@ -4,6 +4,21 @@ import "./styles.css";
 
 const MAX_EVENT_LOG_ITEMS = 150;
 const MAX_SPEECH_HISTORY_ITEMS = 6;
+const DEFAULT_TURN_DETECTION_SETTINGS = {
+  type: "semantic_vad",
+  eagerness: "low",
+  silence_duration_ms: null,
+  prefix_padding_ms: null,
+  threshold: null,
+  create_response: true,
+};
+const TURN_LIFECYCLE_EVENT_TYPES = new Set([
+  "input_audio_buffer.speech_started",
+  "input_audio_buffer.speech_stopped",
+  "input_audio_buffer.committed",
+  "response.created",
+  "response.done",
+]);
 const VOICE_OPTIONS = [
   { value: "male", label: "Male" },
   { value: "female", label: "Female" },
@@ -111,8 +126,10 @@ function base64ToBlobUrl(base64Audio, audioFormat = "mp3") {
 function compactEventPreview(event) {
   return {
     type: event.type,
+    event_id: event.event_id,
     response_id: event.response_id,
     item_id: event.item_id,
+    previous_item_id: event.previous_item_id,
     call_id: event.call_id,
     output_index: event.output_index,
     content_index: event.content_index,
@@ -122,6 +139,13 @@ function compactEventPreview(event) {
     arguments: event.arguments,
     error: event.error,
     item: event.item,
+    response: event.response
+      ? {
+          id: event.response.id,
+          status: event.response.status,
+          status_details: event.response.status_details,
+        }
+      : undefined,
   };
 }
 
@@ -129,6 +153,7 @@ function isRelevantRealtimeEvent(event) {
   if (!event?.type) return false;
 
   return (
+    TURN_LIFECYCLE_EVENT_TYPES.has(event.type) ||
     event.type === "error" ||
     event.type.startsWith("response.") ||
     event.type.includes("transcript") ||
@@ -230,6 +255,7 @@ function App() {
   const [speechHistory, setSpeechHistory] = useState([]);
   const [toolCalls, setToolCalls] = useState([]);
   const [eventLog, setEventLog] = useState([]);
+  const [turnDetectionSettings, setTurnDetectionSettings] = useState(DEFAULT_TURN_DETECTION_SETTINGS);
 
   const peerConnectionRef = useRef(null);
   const eventChannelRef = useRef(null);
@@ -248,6 +274,13 @@ function App() {
   const sentSentenceChunksRef = useRef(new Set());
   const lastFinalSpeechRef = useRef("");
   const latestAvatarStateRef = useRef({});
+  const turnStateRef = useRef({
+    activeResponseId: null,
+    lastCommittedItemId: null,
+    lastSpeechStartedAt: null,
+    lastSpeechStoppedAt: null,
+    responseIdsByItemId: new Map(),
+  });
 
   useEffect(() => {
     voiceGenderRef.current = voiceGender;
@@ -278,6 +311,102 @@ function App() {
   function appendRealtimeEvent(event) {
     if (!isRelevantRealtimeEvent(event)) return;
     appendLog(event.type, compactEventPreview(event));
+  }
+
+  function sendRealtimeClientEvent(event) {
+    const eventChannel = eventChannelRef.current;
+    if (eventChannel?.readyState !== "open") {
+      appendLog("debug.realtime_client_event_skipped", {
+        type: event.type,
+        reason: "Realtime data channel is not open.",
+      });
+      return false;
+    }
+
+    eventChannel.send(JSON.stringify(event));
+    appendLog("debug.realtime_client_event_sent", event);
+    return true;
+  }
+
+  function getResponseId(event) {
+    return event.response?.id || event.response_id || event.id || null;
+  }
+
+  function updateTurnDetectionFromHeader(response) {
+    const encodedSettings = response.headers.get("X-Realtime-Turn-Detection");
+    if (!encodedSettings) return;
+
+    try {
+      const settings = JSON.parse(decodeURIComponent(encodedSettings));
+      setTurnDetectionSettings({
+        silence_duration_ms: null,
+        prefix_padding_ms: null,
+        threshold: null,
+        eagerness: null,
+        ...settings,
+      });
+      appendLog("debug.turn_detection.settings", settings);
+    } catch (error) {
+      appendLog("error", {
+        message: "Could not parse realtime turn detection settings.",
+        details: error.message,
+      });
+    }
+  }
+
+  function handleTurnLifecycleEvent(event) {
+    if (event.type === "input_audio_buffer.speech_started") {
+      turnStateRef.current.lastSpeechStartedAt = getTimestamp();
+      return false;
+    }
+
+    if (event.type === "input_audio_buffer.speech_stopped") {
+      turnStateRef.current.lastSpeechStoppedAt = getTimestamp();
+      return false;
+    }
+
+    if (event.type === "input_audio_buffer.committed") {
+      turnStateRef.current.lastCommittedItemId = event.item_id || null;
+      appendLog("debug.user_input_committed", {
+        item_id: turnStateRef.current.lastCommittedItemId,
+        previous_item_id: event.previous_item_id,
+      });
+      return false;
+    }
+
+    if (event.type === "response.created") {
+      const responseId = getResponseId(event);
+      const activeResponseId = turnStateRef.current.activeResponseId;
+      const itemId = turnStateRef.current.lastCommittedItemId || "unknown-input-item";
+
+      if (activeResponseId && responseId && activeResponseId !== responseId) {
+        appendLog("debug.duplicate_response_suppressed", {
+          active_response_id: activeResponseId,
+          duplicate_response_id: responseId,
+          input_item_id: itemId,
+        });
+        sendRealtimeClientEvent({
+          type: "response.cancel",
+          response_id: responseId,
+        });
+        return true;
+      }
+
+      turnStateRef.current.activeResponseId = responseId || activeResponseId;
+      if (responseId) {
+        turnStateRef.current.responseIdsByItemId.set(itemId, responseId);
+      }
+      return false;
+    }
+
+    if (event.type === "response.done") {
+      const responseId = getResponseId(event);
+      if (!responseId || turnStateRef.current.activeResponseId === responseId) {
+        turnStateRef.current.activeResponseId = null;
+      }
+    }
+
+    return false;
   }
 
   function updateSpeechText(deltaOrText) {
@@ -707,6 +836,8 @@ function App() {
 
   function handleRealtimeEvent(event) {
     appendRealtimeEvent(event);
+    const skipResponseProcessing = handleTurnLifecycleEvent(event);
+    if (skipResponseProcessing) return;
 
     const speechDelta = getAssistantSpeechDelta(event);
     if (speechDelta) {
@@ -858,6 +989,7 @@ function App() {
         throw new Error(errorMessage);
       }
 
+      updateTurnDetectionFromHeader(response);
       const answerSdp = await response.text();
       await peerConnection.setRemoteDescription({
         type: "answer",
@@ -889,6 +1021,13 @@ function App() {
       remoteAudioRef.current.srcObject = null;
     }
     clearHumePlayback();
+    turnStateRef.current = {
+      activeResponseId: null,
+      lastCommittedItemId: null,
+      lastSpeechStartedAt: null,
+      lastSpeechStoppedAt: null,
+      responseIdsByItemId: new Map(),
+    };
 
     setIsRunning(false);
     setStatus("Idle");
@@ -971,6 +1110,39 @@ function App() {
             <p>Realtime speech text, tool arguments, and event previews.</p>
           </div>
         </div>
+
+        <section className="debug-section">
+          <div className="section-heading">
+            <h2>Turn Detection</h2>
+          </div>
+
+          <dl className="metadata-grid">
+            <div>
+              <dt>turn_detection.type</dt>
+              <dd>{turnDetectionSettings.type || "not configured"}</dd>
+            </div>
+            <div>
+              <dt>silence_duration_ms</dt>
+              <dd>{turnDetectionSettings.silence_duration_ms ?? "n/a"}</dd>
+            </div>
+            <div>
+              <dt>prefix_padding_ms</dt>
+              <dd>{turnDetectionSettings.prefix_padding_ms ?? "n/a"}</dd>
+            </div>
+            <div>
+              <dt>threshold</dt>
+              <dd>{turnDetectionSettings.threshold ?? "n/a"}</dd>
+            </div>
+            <div>
+              <dt>create_response</dt>
+              <dd>{String(Boolean(turnDetectionSettings.create_response))}</dd>
+            </div>
+            <div>
+              <dt>semantic_vad eagerness</dt>
+              <dd>{turnDetectionSettings.eagerness || "n/a"}</dd>
+            </div>
+          </dl>
+        </section>
 
         <section className="debug-section">
           <div className="section-heading">
