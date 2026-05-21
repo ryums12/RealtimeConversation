@@ -53,8 +53,25 @@ function getJsonParseStatus(toolCall) {
   return toolCall.jsonParseError ? "invalid JSON" : "valid JSON";
 }
 
+function formatKstTimestamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+
+  return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second} KST`;
+}
+
 function getTimestamp() {
-  return new Date().toISOString();
+  return formatKstTimestamp();
 }
 
 function buildHumeActingInstruction({
@@ -213,6 +230,42 @@ function getAssistantSpeechFinal(event) {
   return "";
 }
 
+function getUserSpeechTranscriptDelta(event) {
+  if (event.type === "conversation.item.input_audio_transcription.delta") {
+    return event.delta || "";
+  }
+
+  return "";
+}
+
+function getUserSpeechTranscriptFinal(event) {
+  if (event.type === "conversation.item.input_audio_transcription.completed") {
+    return event.transcript || "";
+  }
+
+  if (event.type === "conversation.item.done" && event.item?.role === "user") {
+    return extractUserTranscriptFromItem(event.item);
+  }
+
+  return "";
+}
+
+function extractUserTranscriptFromItem(item) {
+  if (!item || item.role !== "user" || !Array.isArray(item.content)) return "";
+
+  return item.content
+    .map((contentPart) => contentPart.transcript || contentPart.text || "")
+    .join("")
+    .trim();
+}
+
+function getLogEntryClassName(type) {
+  if (type === "user_speech") return "user-log";
+  if (type === "ai_response") return "ai-log";
+
+  return "";
+}
+
 function CopyButton({ value, label = "Copy", disabled = false }) {
   async function copyValue() {
     if (!value) return;
@@ -250,6 +303,8 @@ function App() {
   });
   const [lipSyncPlaceholder, setLipSyncPlaceholder] = useState(HUME_LIP_SYNC_PLACEHOLDER);
   const [isRunning, setIsRunning] = useState(false);
+  const [currentUserSpeechText, setCurrentUserSpeechText] = useState("");
+  const [finalUserSpeechText, setFinalUserSpeechText] = useState("");
   const [currentSpeechText, setCurrentSpeechText] = useState("");
   const [finalSpeechText, setFinalSpeechText] = useState("");
   const [speechHistory, setSpeechHistory] = useState([]);
@@ -273,6 +328,8 @@ function App() {
   const sentenceSpeechBufferRef = useRef("");
   const sentSentenceChunksRef = useRef(new Set());
   const lastFinalSpeechRef = useRef("");
+  const userTranscriptBuffersRef = useRef(new Map());
+  const finalizedUserTranscriptKeysRef = useRef(new Set());
   const latestAvatarStateRef = useRef({});
   const turnStateRef = useRef({
     activeResponseId: null,
@@ -409,6 +466,38 @@ function App() {
     return false;
   }
 
+  function updateUserSpeechTranscript(event) {
+    const delta = getUserSpeechTranscriptDelta(event);
+    if (!delta) return;
+
+    const itemId = event.item_id || "active-user-input";
+    const existingText = userTranscriptBuffersRef.current.get(itemId) || "";
+    const nextText = `${existingText}${delta}`;
+    userTranscriptBuffersRef.current.set(itemId, nextText);
+    setCurrentUserSpeechText(nextText);
+  }
+
+  function finalizeUserSpeechTranscript(event) {
+    const transcript = getUserSpeechTranscriptFinal(event).trim();
+    if (!transcript) return;
+
+    const itemId = event.item_id || event.item?.id || "unknown-user-input";
+    const contentIndex = event.content_index ?? 0;
+    const transcriptKey = `${itemId}:${contentIndex}`;
+    if (finalizedUserTranscriptKeysRef.current.has(transcriptKey)) return;
+
+    finalizedUserTranscriptKeysRef.current.add(transcriptKey);
+    userTranscriptBuffersRef.current.delete(itemId);
+    setCurrentUserSpeechText("");
+    setFinalUserSpeechText(transcript);
+    appendLog("user_speech", {
+      label: "User",
+      text: transcript,
+      item_id: itemId,
+      source_event: event.type,
+    });
+  }
+
   function updateSpeechText(deltaOrText) {
     if (!deltaOrText) return;
 
@@ -431,7 +520,7 @@ function App() {
     lastFinalSpeechRef.current = completedText;
     setCurrentSpeechText("");
     setFinalSpeechText(completedText);
-    appendLog("assistant.speech.final", { text: completedText });
+    appendLog("ai_response", { label: "AI", text: completedText });
 
     const finalChunks = sentSentenceChunksRef.current.size > 0
       ? [sentenceSpeechBufferRef.current.trim()].filter(Boolean)
@@ -837,6 +926,9 @@ function App() {
     const skipResponseProcessing = handleTurnLifecycleEvent(event);
     if (skipResponseProcessing) return;
 
+    updateUserSpeechTranscript(event);
+    finalizeUserSpeechTranscript(event);
+
     const speechDelta = getAssistantSpeechDelta(event);
     if (speechDelta) {
       updateSpeechText(speechDelta);
@@ -1026,10 +1118,18 @@ function App() {
       lastSpeechStoppedAt: null,
       responseIdsByItemId: new Map(),
     };
+    userTranscriptBuffersRef.current = new Map();
+    finalizedUserTranscriptKeysRef.current = new Set();
 
     setIsRunning(false);
     setStatus("Idle");
+    setCurrentUserSpeechText("");
   }
+
+  const conversationLogItems = eventLog
+    .filter((item) => item.type === "user_speech" || item.type === "ai_response")
+    .slice()
+    .reverse();
 
   return (
     <main className="app">
@@ -1105,9 +1205,49 @@ function App() {
         <div className="section-heading">
           <div>
             <h1>Debug / Inspector</h1>
-            <p>Realtime speech text, tool arguments, and event previews.</p>
+            <p>User and AI transcript logs, tool arguments, Hume TTS, and event previews.</p>
           </div>
         </div>
+
+        <section className="debug-section">
+          <div className="section-heading">
+            <h2>Conversation Logs</h2>
+            <CopyButton
+              value={conversationLogItems
+                .map((item) => `[${item.timestamp}] ${item.preview?.label || item.type}\n${item.preview?.text || ""}`)
+                .join("\n\n")}
+              label="Copy transcript"
+              disabled={conversationLogItems.length === 0}
+            />
+          </div>
+
+          <div className="speech-grid">
+            <div>
+              <h3>User Streaming</h3>
+              <pre className="text-block">{currentUserSpeechText || "No streaming user transcript yet."}</pre>
+            </div>
+            <div>
+              <h3>User Final</h3>
+              <pre className="text-block">{finalUserSpeechText || "No completed user transcript yet."}</pre>
+            </div>
+          </div>
+
+          <div className="conversation-log">
+            {conversationLogItems.length === 0 ? (
+              <p className="empty-state">No user or AI transcript logs yet.</p>
+            ) : (
+              conversationLogItems.map((item) => (
+                <article className={`conversation-item ${getLogEntryClassName(item.type)}`} key={item.id}>
+                  <div className="conversation-meta">
+                    <strong>{item.preview?.label || item.type}</strong>
+                    <time>{item.timestamp}</time>
+                  </div>
+                  <p>{item.preview?.text || ""}</p>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
 
         <section className="debug-section">
           <div className="section-heading">
