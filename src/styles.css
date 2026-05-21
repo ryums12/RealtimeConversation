@@ -210,12 +210,14 @@ h4 {
 }
 
 .history-list,
+.conversation-log,
 .tool-call-list,
 .event-log {
   display: grid;
   gap: 10px;
 }
 
+.conversation-item,
 .history-item,
 .tool-call,
 .event-item {
@@ -225,6 +227,45 @@ h4 {
   border: 1px solid #d7e0e4;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.conversation-item,
+.event-item.user-log,
+.event-item.ai-log {
+  border-left-width: 4px;
+}
+
+.conversation-item.user-log,
+.event-item.user-log {
+  border-color: #9bbcf7;
+  border-left-color: #2f6fed;
+  background: #f4f8ff;
+}
+
+.conversation-item.ai-log,
+.event-item.ai-log {
+  border-color: #a8dfbd;
+  border-left-color: #20844a;
+  background: #f4fbf7;
+}
+
+.conversation-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.conversation-meta strong {
+  color: #172026;
+  font-size: 0.9rem;
+}
+
+.conversation-item p {
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .history-item p {

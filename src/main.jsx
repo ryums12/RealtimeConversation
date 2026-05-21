@@ -171,6 +171,7 @@ function isRelevantRealtimeEvent(event) {
 
   return (
     TURN_LIFECYCLE_EVENT_TYPES.has(event.type) ||
+    event.type === "conversation.item.done" ||
     event.type === "error" ||
     event.type.startsWith("response.") ||
     event.type.includes("transcript") ||
@@ -1384,7 +1385,7 @@ function App() {
               <p className="empty-state">No relevant realtime events logged yet.</p>
             ) : (
               eventLog.map((item) => (
-                <article className="event-item" key={item.id}>
+                <article className={`event-item ${getLogEntryClassName(item.type)}`} key={item.id}>
                   <div className="event-summary">
                     <strong>{item.type}</strong>
                     <time>{item.timestamp}</time>

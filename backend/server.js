@@ -185,6 +185,9 @@ app.post("/api/session", async (req, res) => {
     instructions,
     audio: {
       input: {
+        transcription: {
+          model: "gpt-4o-mini-transcribe",
+        },
         turn_detection: realtimeTurnDetection,
       },
     },
