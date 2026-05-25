@@ -4,16 +4,41 @@ const { Pool } = pg;
 
 let pool;
 
+function getSslConfig(sslValue) {
+  return sslValue === "false" ? false : { rejectUnauthorized: false };
+}
+
+function getDatabaseConfig() {
+  if (process.env.DATABASE_URL) {
+    return {
+      connectionString: process.env.DATABASE_URL,
+      ssl: getSslConfig(process.env.DATABASE_SSL),
+    };
+  }
+
+  if (!process.env.SUPABASE_DB_HOST) {
+    return null;
+  }
+
+  return {
+    host: process.env.SUPABASE_DB_HOST,
+    port: Number(process.env.SUPABASE_DB_PORT || 6543),
+    database: process.env.SUPABASE_DB_NAME || "postgres",
+    user: process.env.SUPABASE_DB_USER,
+    password: process.env.SUPABASE_DB_PASSWORD,
+    ssl: getSslConfig(process.env.SUPABASE_DB_SSL),
+  };
+}
+
 export function getDatabasePool() {
-  if (!process.env.DATABASE_URL) {
+  const databaseConfig = getDatabaseConfig();
+
+  if (!databaseConfig) {
     return null;
   }
 
   if (!pool) {
-    pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.DATABASE_SSL === "false" ? false : { rejectUnauthorized: false },
-    });
+    pool = new Pool(databaseConfig);
   }
 
   return pool;
@@ -23,7 +48,7 @@ export async function queryDatabase(text, params = []) {
   const databasePool = getDatabasePool();
 
   if (!databasePool) {
-    const error = new Error("DATABASE_URL is not configured.");
+    const error = new Error("Database connection is not configured.");
     error.statusCode = 503;
     throw error;
   }
@@ -35,7 +60,7 @@ export async function withDatabaseTransaction(callback) {
   const databasePool = getDatabasePool();
 
   if (!databasePool) {
-    const error = new Error("DATABASE_URL is not configured.");
+    const error = new Error("Database connection is not configured.");
     error.statusCode = 503;
     throw error;
   }
