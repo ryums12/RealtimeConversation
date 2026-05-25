@@ -23,9 +23,9 @@ const VOICE_OPTIONS = [
   { value: "male", label: "Male" },
   { value: "female", label: "Female" },
 ];
-const HUME_LIP_SYNC_PLACEHOLDER = {
+const TTS_LIP_SYNC_PLACEHOLDER = {
   enabled: false,
-  source: "hume_octave",
+  source: "tts",
   mode: "placeholder",
   timestampsAvailable: false,
   wordTimestamps: [],
@@ -74,7 +74,7 @@ function getTimestamp() {
   return formatKstTimestamp();
 }
 
-function buildHumeActingInstruction({
+function buildTTSActingInstruction({
   emotion,
   intensity,
   speakingStyle,
@@ -98,9 +98,9 @@ function buildHumeActingInstruction({
   return `Speak in a ${style} tone with ${intensityText} ${mood} expression.`;
 }
 
-function getHumeSocketUrl() {
+function getTTSSocketUrl() {
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${window.location.host}/api/hume/tts-stream`;
+  return `${protocol}//${window.location.host}/api/tts/stream`;
 }
 
 function extractCompleteSentenceChunks(buffer) {
@@ -282,16 +282,16 @@ function CopyButton({ value, label = "Copy", disabled = false }) {
 
 function App() {
   const [scenario, setScenario] = useState(
-    "당신은 사용자의 이웃집 사람이다. 평범한 사람을 연기하되, 사용자가 하는 말에 따라서 감정 변화를 드러내도록 한다."
+        "당신은 사용자의 이웃집 사람이다. 평범한 사람을 연기하되, 사용자가 하는 말에 따라서 감정 변화를 드러내도록 한다."
   );
   const [enableSampleTool, setEnableSampleTool] = useState(false);
   const [voiceGender, setVoiceGender] = useState("male");
   const [enableResponseLogs, setEnableResponseLogs] = useState(true);
   const [showLogPanel, setShowLogPanel] = useState(true);
   const [status, setStatus] = useState("Idle");
-  const [humeStatus, setHumeStatus] = useState("Hume Octave idle");
-  const [humeError, setHumeError] = useState("");
-  const [humeDebug, setHumeDebug] = useState({
+  const [TTSStatus, setTTSStatus] = useState("TTS idle");
+  const [TTSError, setTTSError] = useState("");
+  const [TTSDebug, setTTSDebug] = useState({
     selectedVoiceGender: "male",
     maskedVoiceId: "Not resolved yet",
     connectionStatus: "disconnected",
@@ -302,7 +302,7 @@ function App() {
     playbackStatus: "idle",
     hasLipSyncPlaceholder: true,
   });
-  const [lipSyncPlaceholder, setLipSyncPlaceholder] = useState(HUME_LIP_SYNC_PLACEHOLDER);
+  const [lipSyncPlaceholder, setLipSyncPlaceholder] = useState(TTS_LIP_SYNC_PLACEHOLDER);
   const [isRunning, setIsRunning] = useState(false);
   const [currentUserSpeechText, setCurrentUserSpeechText] = useState("");
   const [finalUserSpeechText, setFinalUserSpeechText] = useState("");
@@ -317,12 +317,12 @@ function App() {
   const eventChannelRef = useRef(null);
   const localStreamRef = useRef(null);
   const remoteAudioRef = useRef(null);
-  const humeSocketRef = useRef(null);
-  const humeMessageQueueRef = useRef([]);
-  const humeRunIdRef = useRef(0);
-  const humeAudioQueueRef = useRef([]);
-  const humeAudioPlayingRef = useRef(false);
-  const humeCurrentAudioRef = useRef(null);
+  const TTSSocketRef = useRef(null);
+  const TTSMessageQueueRef = useRef([]);
+  const TTSRunIdRef = useRef(0);
+  const TTSAudioQueueRef = useRef([]);
+  const TTSAudioPlayingRef = useRef(false);
+  const TTSCurrentAudioRef = useRef(null);
   const voiceGenderRef = useRef(voiceGender);
   const enableResponseLogsRef = useRef(enableResponseLogs);
   const currentSpeechBufferRef = useRef("");
@@ -342,11 +342,11 @@ function App() {
 
   useEffect(() => {
     voiceGenderRef.current = voiceGender;
-    setHumeDebug((debug) => ({
+    setTTSDebug((debug) => ({
       ...debug,
       selectedVoiceGender: voiceGender,
     }));
-    appendLog("hume.voice.selected", { voiceGender });
+    appendLog("tts.voice.selected", { voiceGender });
   }, [voiceGender]);
 
   useEffect(() => {
@@ -510,7 +510,7 @@ function App() {
     const { chunks, remaining } = extractCompleteSentenceChunks(sentenceSpeechBufferRef.current);
     sentenceSpeechBufferRef.current = remaining;
 
-    chunks.forEach((chunk) => enqueueHumeSpeech(chunk, "sentence_delta"));
+    chunks.forEach((chunk) => enqueueTTSSpeech(chunk, "sentence_delta"));
   }
 
   function finalizeSpeechText(text) {
@@ -527,7 +527,7 @@ function App() {
       ? [sentenceSpeechBufferRef.current.trim()].filter(Boolean)
       : splitSpeechIntoChunks(completedText);
     sentenceSpeechBufferRef.current = "";
-    finalChunks.forEach((chunk) => enqueueHumeSpeech(chunk, "final_text"));
+    finalChunks.forEach((chunk) => enqueueTTSSpeech(chunk, "final_text"));
 
     setSpeechHistory((items) =>
       [
@@ -541,45 +541,45 @@ function App() {
     );
   }
 
-  function updateHumeDebug(patch) {
-    setHumeDebug((debug) => ({
+  function updateTTSDebug(patch) {
+    setTTSDebug((debug) => ({
       ...debug,
       ...patch,
       hasLipSyncPlaceholder: true,
     }));
   }
 
-  function clearHumePlayback() {
-    humeRunIdRef.current += 1;
-    humeMessageQueueRef.current = [];
-    humeAudioQueueRef.current.forEach((item) => URL.revokeObjectURL(item.url));
-    humeAudioQueueRef.current = [];
-    humeAudioPlayingRef.current = false;
-    humeCurrentAudioRef.current?.pause();
-    humeCurrentAudioRef.current = null;
+  function clearTTSPlayback() {
+    TTSRunIdRef.current += 1;
+    TTSMessageQueueRef.current = [];
+    TTSAudioQueueRef.current.forEach((item) => URL.revokeObjectURL(item.url));
+    TTSAudioQueueRef.current = [];
+    TTSAudioPlayingRef.current = false;
+    TTSCurrentAudioRef.current?.pause();
+    TTSCurrentAudioRef.current = null;
 
-    if (humeSocketRef.current?.readyState === WebSocket.OPEN) {
-      humeSocketRef.current.send(JSON.stringify({ type: "close" }));
-      humeSocketRef.current.close();
+    if (TTSSocketRef.current?.readyState === WebSocket.OPEN) {
+      TTSSocketRef.current.send(JSON.stringify({ type: "close" }));
+      TTSSocketRef.current.close();
     }
-    humeSocketRef.current = null;
+    TTSSocketRef.current = null;
 
-    setHumeStatus("Hume Octave idle");
-    updateHumeDebug({
+    setTTSStatus("TTS idle");
+    updateTTSDebug({
       connectionStatus: "disconnected",
       streamingStatus: "idle",
       playbackStatus: "idle",
     });
   }
 
-  function enqueueHumeSpeech(text, source) {
+  function enqueueTTSSpeech(text, source) {
     const trimmedText = text?.trim();
     if (!trimmedText) return;
     if (sentSentenceChunksRef.current.has(trimmedText)) return;
     sentSentenceChunksRef.current.add(trimmedText);
 
     const emotionState = latestAvatarStateRef.current || {};
-    const actingInstruction = buildHumeActingInstruction(emotionState);
+    const actingInstruction = buildTTSActingInstruction(emotionState);
     const item = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       text: trimmedText,
@@ -595,83 +595,83 @@ function App() {
       },
     };
 
-    humeMessageQueueRef.current.push(item);
-    appendLog("hume.sentence_chunk.queued", {
+    TTSMessageQueueRef.current.push(item);
+    appendLog("tts.sentence_chunk.queued", {
       voiceGender: item.voiceGender,
       source,
       text: item.text,
       actingInstruction,
     });
-    sendQueuedHumeMessages();
+    sendQueuedTTSMessages();
   }
 
-  function connectHumeSocket() {
-    const existingSocket = humeSocketRef.current;
+  function connectTTSSocket() {
+    const existingSocket = TTSSocketRef.current;
     if (existingSocket?.readyState === WebSocket.OPEN) return existingSocket;
     if (existingSocket?.readyState === WebSocket.CONNECTING) return existingSocket;
 
-    setHumeError("");
-    setHumeStatus("Connecting to Hume Octave...");
-    updateHumeDebug({
+    setTTSError("");
+    setTTSStatus("Connecting to TTS...");
+    updateTTSDebug({
       connectionStatus: "connecting",
       streamingStatus: "connecting",
       latestError: "",
     });
 
-    const socket = new WebSocket(getHumeSocketUrl());
-    humeSocketRef.current = socket;
+    const socket = new WebSocket(getTTSSocketUrl());
+    TTSSocketRef.current = socket;
 
     socket.onopen = () => {
-      setHumeStatus("Hume Octave connected");
-      updateHumeDebug({
+      setTTSStatus("TTS connected");
+      updateTTSDebug({
         connectionStatus: "connected",
         streamingStatus: "ready",
       });
-      appendLog("hume.websocket.open", { endpoint: "/api/hume/tts-stream" });
-      sendQueuedHumeMessages();
+      appendLog("tts.websocket.open", { endpoint: "/api/tts/stream" });
+      sendQueuedTTSMessages();
     };
 
     socket.onclose = (event) => {
-      setHumeStatus("Hume Octave disconnected");
-      updateHumeDebug({
+      setTTSStatus("TTS disconnected");
+      updateTTSDebug({
         connectionStatus: "disconnected",
         streamingStatus: "idle",
       });
-      appendLog("hume.websocket.closed", { code: event.code, reason: event.reason });
+      appendLog("tts.websocket.closed", { code: event.code, reason: event.reason });
     };
 
     socket.onerror = () => {
-      const message = "Hume Octave proxy WebSocket failed.";
-      setHumeError(message);
-      setHumeStatus("Hume Octave error");
-      updateHumeDebug({
+      const message = "TTS proxy WebSocket failed.";
+      setTTSError(message);
+      setTTSStatus("TTS error");
+      updateTTSDebug({
         connectionStatus: "error",
         streamingStatus: "error",
         latestError: message,
       });
-      appendLog("hume.error", { message });
+      appendLog("tts.error", { message });
     };
 
     socket.onmessage = (messageEvent) => {
       try {
-        handleHumeMessage(JSON.parse(messageEvent.data));
+        handleTTSMessage(JSON.parse(messageEvent.data));
       } catch (error) {
-        const message = error.message || "Could not parse Hume proxy message.";
-        setHumeError(message);
-        updateHumeDebug({ latestError: message });
-        appendLog("hume.error", { message, raw: messageEvent.data });
+        const message = error.message || "Could not parse TTS proxy message.";
+        setTTSError(message);
+        updateTTSDebug({ latestError: message });
+        appendLog("tts.error", { message, raw: messageEvent.data });
       }
     };
 
     return socket;
   }
 
-  function sendQueuedHumeMessages() {
-    const socket = connectHumeSocket();
+  function sendQueuedTTSMessages() {
+    const socket = connectTTSSocket();
     if (socket.readyState !== WebSocket.OPEN) return;
 
-    while (humeMessageQueueRef.current.length > 0) {
-      const item = humeMessageQueueRef.current.shift();
+    while (TTSMessageQueueRef.current.length > 0) {
+      const item = TTSMessageQueueRef.current.shift();
       socket.send(JSON.stringify({
         type: "speak",
         text: item.text,
@@ -681,14 +681,14 @@ function App() {
         speakingStyle: item.speakingStyle,
         lipSync: item.lipSync,
       }));
-      setHumeStatus(`Streaming ${item.voiceGender} text to Hume Octave...`);
-      updateHumeDebug({
+      setTTSStatus(`Streaming ${item.voiceGender} text to TTS...`);
+      updateTTSDebug({
         selectedVoiceGender: item.voiceGender,
         streamingStatus: "sending_text",
         latestTextChunk: item.text,
         latestActingInstruction: item.actingInstruction,
       });
-      appendLog("hume.text.sent", {
+      appendLog("tts.text.sent", {
         voiceGender: item.voiceGender,
         text: item.text,
         actingInstruction: item.actingInstruction,
@@ -696,22 +696,22 @@ function App() {
     }
   }
 
-  function handleHumeMessage(message) {
-    if (message.type === "hume.connection.open") {
-      setHumeStatus("Hume Octave connected");
-      updateHumeDebug({
+  function handleTTSMessage(message) {
+    if (message.type === "tts.connection.open") {
+      setTTSStatus("TTS connected");
+      updateTTSDebug({
         connectionStatus: "connected",
         streamingStatus: "ready",
       });
-      appendLog("hume.connection.opened", {});
+      appendLog("tts.connection.opened", {});
       return;
     }
 
-    if (message.type === "hume.request.accepted") {
-      setHumeStatus("Hume Octave generating audio...");
-      setHumeError("");
-      setLipSyncPlaceholder(message.lipSync || HUME_LIP_SYNC_PLACEHOLDER);
-      updateHumeDebug({
+    if (message.type === "tts.request.accepted") {
+      setTTSStatus("TTS generating audio...");
+      setTTSError("");
+      setLipSyncPlaceholder(message.lipSync || TTS_LIP_SYNC_PLACEHOLDER);
+      updateTTSDebug({
         selectedVoiceGender: message.voiceGender,
         maskedVoiceId: message.maskedVoiceId || "configured",
         streamingStatus: "generating",
@@ -719,7 +719,7 @@ function App() {
         latestActingInstruction: message.actingInstruction || "",
         latestError: "",
       });
-      appendLog("hume.request.accepted", {
+      appendLog("tts.request.accepted", {
         voiceGender: message.voiceGender,
         maskedVoiceId: message.maskedVoiceId,
         text: message.text,
@@ -728,119 +728,119 @@ function App() {
       return;
     }
 
-    if (message.type === "hume.audio") {
-      setHumeStatus("Hume Octave audio received");
-      setLipSyncPlaceholder(message.lipSync || HUME_LIP_SYNC_PLACEHOLDER);
-      updateHumeDebug({
+    if (message.type === "tts.audio") {
+      setTTSStatus("TTS audio received");
+      setLipSyncPlaceholder(message.lipSync || TTS_LIP_SYNC_PLACEHOLDER);
+      updateTTSDebug({
         streamingStatus: message.isLastChunk ? "last_audio_chunk" : "receiving_audio",
       });
-      appendLog("hume.audio.chunk", {
+      appendLog("tts.audio.chunk", {
         chunkIndex: message.chunkIndex,
         isLastChunk: message.isLastChunk,
         audioFormat: message.audioFormat,
         text: message.text,
       });
-      enqueueHumeAudioChunk(message.audio, message.audioFormat);
+      enqueueTTSAudioChunk(message.audio, message.audioFormat);
       return;
     }
 
-    if (message.type === "hume.metadata") {
+    if (message.type === "tts.metadata") {
       if (message.lipSync) {
         setLipSyncPlaceholder(message.lipSync);
-        appendLog("hume.lip_sync.placeholder", message.lipSync);
+        appendLog("tts.lip_sync.placeholder", message.lipSync);
       }
-      appendLog("hume.metadata", message.metadata || message.raw || {});
+      appendLog("tts.metadata", message.metadata || message.raw || {});
       return;
     }
 
-    if (message.type === "hume.error") {
-      const errorMessage = message.error || "Hume Octave error.";
-      setHumeError(errorMessage);
-      setHumeStatus("Hume Octave error");
-      updateHumeDebug({
+    if (message.type === "tts.error") {
+      const errorMessage = message.error || "TTS error.";
+      setTTSError(errorMessage);
+      setTTSStatus("TTS error");
+      updateTTSDebug({
         streamingStatus: "error",
         latestError: errorMessage,
       });
-      appendLog("hume.error", { message: errorMessage, status: message.status });
+      appendLog("tts.error", { message: errorMessage, status: message.status });
       return;
     }
 
-    if (message.type === "hume.connection.closed") {
-      updateHumeDebug({
+    if (message.type === "tts.connection.closed") {
+      updateTTSDebug({
         connectionStatus: "disconnected",
         streamingStatus: "idle",
       });
-      appendLog("hume.connection.closed", {
+      appendLog("tts.connection.closed", {
         code: message.code,
         reason: message.reason,
       });
     }
   }
 
-  function enqueueHumeAudioChunk(base64Audio, audioFormat) {
+  function enqueueTTSAudioChunk(base64Audio, audioFormat) {
     if (!base64Audio) return;
 
     try {
       const url = base64ToBlobUrl(base64Audio, audioFormat);
-      humeAudioQueueRef.current.push({ url });
-      processHumeAudioQueue();
+      TTSAudioQueueRef.current.push({ url });
+      processTTSAudioQueue();
     } catch (error) {
-      const message = error.message || "Could not decode Hume audio chunk.";
-      setHumeError(message);
-      updateHumeDebug({
+      const message = error.message || "Could not decode TTS audio chunk.";
+      setTTSError(message);
+      updateTTSDebug({
         playbackStatus: "error",
         latestError: message,
       });
-      appendLog("hume.error", { message });
+      appendLog("tts.error", { message });
     }
   }
 
-  function processHumeAudioQueue() {
-    if (humeAudioPlayingRef.current) return;
-    const nextAudio = humeAudioQueueRef.current.shift();
+  function processTTSAudioQueue() {
+    if (TTSAudioPlayingRef.current) return;
+    const nextAudio = TTSAudioQueueRef.current.shift();
     if (!nextAudio) {
-      updateHumeDebug({ playbackStatus: "idle" });
+      updateTTSDebug({ playbackStatus: "idle" });
       return;
     }
 
-    humeAudioPlayingRef.current = true;
+    TTSAudioPlayingRef.current = true;
     const audio = new Audio(nextAudio.url);
-    humeCurrentAudioRef.current = audio;
-    updateHumeDebug({ playbackStatus: "playing" });
+    TTSCurrentAudioRef.current = audio;
+    updateTTSDebug({ playbackStatus: "playing" });
 
     audio.onended = () => {
       URL.revokeObjectURL(nextAudio.url);
-      humeAudioPlayingRef.current = false;
-      humeCurrentAudioRef.current = null;
-      updateHumeDebug({ playbackStatus: "ended" });
-      processHumeAudioQueue();
+      TTSAudioPlayingRef.current = false;
+      TTSCurrentAudioRef.current = null;
+      updateTTSDebug({ playbackStatus: "ended" });
+      processTTSAudioQueue();
     };
 
     audio.onerror = () => {
       URL.revokeObjectURL(nextAudio.url);
-      humeAudioPlayingRef.current = false;
-      humeCurrentAudioRef.current = null;
-      const message = "Browser could not play a Hume audio chunk.";
-      setHumeError(message);
-      updateHumeDebug({
+      TTSAudioPlayingRef.current = false;
+      TTSCurrentAudioRef.current = null;
+      const message = "Browser could not play a TTS audio chunk.";
+      setTTSError(message);
+      updateTTSDebug({
         playbackStatus: "error",
         latestError: message,
       });
-      appendLog("hume.error", { message });
-      processHumeAudioQueue();
+      appendLog("tts.error", { message });
+      processTTSAudioQueue();
     };
 
     audio.play().catch((error) => {
       URL.revokeObjectURL(nextAudio.url);
-      humeAudioPlayingRef.current = false;
-      humeCurrentAudioRef.current = null;
-      const message = error.message || "Browser blocked Hume audio playback.";
-      setHumeError(message);
-      updateHumeDebug({
+      TTSAudioPlayingRef.current = false;
+      TTSCurrentAudioRef.current = null;
+      const message = error.message || "Browser blocked TTS audio playback.";
+      setTTSError(message);
+      updateTTSDebug({
         playbackStatus: "error",
         latestError: message,
       });
-      appendLog("hume.error", { message });
+      appendLog("tts.error", { message });
     });
   }
 
@@ -896,10 +896,10 @@ function App() {
       if (!parsed.error && parsed.parsed && typeof parsed.parsed === "object") {
         latestAvatarStateRef.current = parsed.parsed;
         const nextLipSync = {
-          ...HUME_LIP_SYNC_PLACEHOLDER,
+          ...TTS_LIP_SYNC_PLACEHOLDER,
           ...(parsed.parsed.lipSync || {}),
           enabled: false,
-          source: "hume_octave",
+          source: "tts",
           mode: "placeholder",
         };
         setLipSyncPlaceholder(nextLipSync);
@@ -907,7 +907,7 @@ function App() {
           name: functionName && functionName !== "unknown" ? functionName : call.name,
           arguments: parsed.parsed,
         });
-        appendLog("hume.lip_sync.placeholder", nextLipSync);
+        appendLog("tts.lip_sync.placeholder", nextLipSync);
       }
 
       return {
@@ -1006,7 +1006,7 @@ function App() {
       peerConnection.ontrack = (event) => {
         event.track.enabled = false;
         appendLog("debug.realtime_audio_track_ignored", {
-          message: "Realtime audio output is ignored so only Hume Octave audio is played.",
+          message: "Realtime audio output is ignored so only TTS audio is played.",
         });
       };
 
@@ -1111,7 +1111,7 @@ function App() {
     if (remoteAudioRef.current) {
       remoteAudioRef.current.srcObject = null;
     }
-    clearHumePlayback();
+    clearTTSPlayback();
     turnStateRef.current = {
       activeResponseId: null,
       lastCommittedItemId: null,
@@ -1198,15 +1198,15 @@ function App() {
         </div>
 
         <p className="status">Status: {status}</p>
-        <p className="status">TTS: {humeStatus}</p>
-        {humeError && <p className="error-message">{humeError}</p>}
+        <p className="status">TTS: {TTSStatus}</p>
+        {TTSError && <p className="error-message">{TTSError}</p>}
       </section>
 
       {showLogPanel && <section className="debug-panel" aria-label="Debug Inspector">
         <div className="section-heading">
           <div>
             <h1>Debug / Inspector</h1>
-            <p>User and AI transcript logs, tool arguments, Hume TTS, and event previews.</p>
+            <p>User and AI transcript logs, tool arguments, TTS, and event previews.</p>
           </div>
         </div>
 
@@ -1282,23 +1282,23 @@ function App() {
 
         <section className="debug-section">
           <div className="section-heading">
-            <h2>Hume Octave TTS</h2>
+            <h2>TTS</h2>
           </div>
 
           <div className="speech-grid">
             <div>
               <h3>Latest text sent</h3>
-              <pre className="text-block">{humeDebug.latestTextChunk || "No text sent to Hume yet."}</pre>
+              <pre className="text-block">{TTSDebug.latestTextChunk || "No text sent to TTS yet."}</pre>
             </div>
             <div>
               <h3>Latest acting instruction</h3>
               <pre className="text-block">
-                {humeDebug.latestActingInstruction || "No acting instruction sent yet."}
+                {TTSDebug.latestActingInstruction || "No acting instruction sent yet."}
               </pre>
             </div>
           </div>
 
-          {humeDebug.latestError && <p className="error-message">{humeDebug.latestError}</p>}
+          {TTSDebug.latestError && <p className="error-message">{TTSDebug.latestError}</p>}
         </section>
 
         <section className="debug-section">
@@ -1404,3 +1404,5 @@ function App() {
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+
+

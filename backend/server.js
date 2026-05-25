@@ -3,7 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
-import WebSocket, { WebSocketServer } from "ws";
+import { createTtsProxyServer } from "./tts/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -15,108 +15,13 @@ dotenv.config({ path: join(__dirname, ".env") });
 const app = express();
 const port = process.env.PORT || 3000;
 const server = createServer(app);
-const humeProxyServer = new WebSocketServer({ noServer: true });
-const HUME_VOICE_IDS = {
-  male: process.env.HUME_MALE_VOICE_ID,
-  female: process.env.HUME_FEMALE_VOICE_ID,
-};
-const allowedVoiceGenders = ["male", "female"];
+const ttsProxyServer = createTtsProxyServer();
 const realtimeTurnDetection = {
   type: "semantic_vad",
   eagerness: "low",
   create_response: true,
   interrupt_response: false,
 };
-
-function maskVoiceId(voiceId) {
-  if (!voiceId || voiceId.length < 10) return "configured";
-  return `${voiceId.slice(0, 8)}...${voiceId.slice(-4)}`;
-}
-
-function buildHumeActingInstruction({
-  emotion,
-  intensity,
-  speakingStyle,
-} = {}) {
-  const normalizedIntensity = Number.isFinite(Number(intensity))
-    ? Math.max(0, Math.min(1, Number(intensity)))
-    : null;
-  const intensityText =
-    normalizedIntensity === null
-      ? "natural"
-      : normalizedIntensity >= 0.75
-        ? "high"
-        : normalizedIntensity >= 0.4
-          ? "moderate"
-          : "gentle";
-  const style = typeof speakingStyle === "string" && speakingStyle.trim()
-    ? speakingStyle.trim()
-    : "clear and conversational";
-  const mood = typeof emotion === "string" && emotion.trim() ? emotion.trim() : "neutral";
-
-  return `Speak in a ${style} tone with ${intensityText} ${mood} expression.`;
-}
-
-function createLipSyncPlaceholder(extra = {}) {
-  return {
-    lipSync: {
-      enabled: false,
-      source: "hume_octave",
-      mode: "placeholder",
-      timestampsAvailable: false,
-      wordTimestamps: [],
-      phonemeTimestamps: [],
-      visemes: [],
-      ...extra,
-    },
-  };
-}
-
-function getMissingHumeConfigError(voiceGender) {
-  if (!allowedVoiceGenders.includes(voiceGender)) {
-    return "Invalid voice gender.";
-  }
-
-  if (!process.env.HUME_API_KEY) {
-    return "Missing HUME_API_KEY. Please configure it in the .env file.";
-  }
-
-  if (!process.env.HUME_TTS_WEBSOCKET_URL) {
-    return "Missing HUME_TTS_WEBSOCKET_URL. Please configure it in the .env file.";
-  }
-
-  if (!HUME_VOICE_IDS[voiceGender]) {
-    return "Missing Hume voice ID. Please configure HUME_MALE_VOICE_ID or HUME_FEMALE_VOICE_ID in the .env file.";
-  }
-
-  return "";
-}
-
-function buildHumeWebSocketUrl() {
-  const url = new URL(process.env.HUME_TTS_WEBSOCKET_URL);
-  url.searchParams.set("api_key", process.env.HUME_API_KEY);
-  url.searchParams.set("no_binary", "true");
-  url.searchParams.set("instant_mode", "true");
-  url.searchParams.set("format_type", "mp3");
-  url.searchParams.set("strip_headers", "false");
-
-  if (process.env.HUME_TTS_VERSION) {
-    url.searchParams.set("version", process.env.HUME_TTS_VERSION);
-  }
-
-  if (process.env.HUME_TTS_VERSION === "2") {
-    url.searchParams.append("include_timestamp_types", "word");
-    url.searchParams.append("include_timestamp_types", "phoneme");
-  }
-
-  return url.toString();
-}
-
-function sendClientMessage(clientSocket, payload) {
-  if (clientSocket.readyState === WebSocket.OPEN) {
-    clientSocket.send(JSON.stringify(payload));
-  }
-}
 
 const sampleAvatarTool = {
   type: "function",
@@ -230,200 +135,16 @@ app.post("/api/session", async (req, res) => {
   }
 });
 
-humeProxyServer.on("connection", (clientSocket) => {
-  let humeSocket = null;
-  let lastVoiceGender = null;
-
-  function closeHumeSocket() {
-    if (humeSocket && humeSocket.readyState === WebSocket.OPEN) {
-      humeSocket.send(JSON.stringify({ close: true }));
-      humeSocket.close();
-    }
-    humeSocket = null;
-  }
-
-  function connectToHume() {
-    return new Promise((resolve, reject) => {
-      if (humeSocket?.readyState === WebSocket.OPEN) {
-        resolve(humeSocket);
-        return;
-      }
-
-      const url = buildHumeWebSocketUrl();
-      const nextSocket = new WebSocket(url);
-      humeSocket = nextSocket;
-
-      nextSocket.on("open", () => {
-        sendClientMessage(clientSocket, {
-          type: "hume.connection.open",
-          status: "connected",
-        });
-        resolve(nextSocket);
-      });
-
-      nextSocket.on("message", (rawData, isBinary) => {
-        if (isBinary) {
-          sendClientMessage(clientSocket, {
-            type: "hume.audio",
-            audio: Buffer.from(rawData).toString("base64"),
-            audioFormat: "mp3",
-            lipSync: createLipSyncPlaceholder().lipSync,
-          });
-          return;
-        }
-
-        let message;
-        try {
-          message = JSON.parse(rawData.toString());
-        } catch {
-          sendClientMessage(clientSocket, {
-            type: "hume.metadata",
-            raw: rawData.toString(),
-          });
-          return;
-        }
-
-        const lipSync = createLipSyncPlaceholder({
-          timestampsAvailable: Boolean(message.word_timestamps?.length || message.phoneme_timestamps?.length),
-          wordTimestamps: message.word_timestamps || [],
-          phonemeTimestamps: message.phoneme_timestamps || [],
-        }).lipSync;
-
-        if (message.type === "audio" && message.audio) {
-          sendClientMessage(clientSocket, {
-            type: "hume.audio",
-            audio: message.audio,
-            audioFormat: message.audio_format || "mp3",
-            chunkIndex: message.chunk_index,
-            isLastChunk: message.is_last_chunk,
-            generationId: message.generation_id,
-            snippetId: message.snippet_id,
-            requestId: message.request_id,
-            text: message.text,
-            lipSync,
-          });
-        } else {
-          sendClientMessage(clientSocket, {
-            type: "hume.metadata",
-            metadata: message,
-            lipSync,
-          });
-        }
-      });
-
-      nextSocket.on("close", (code, reason) => {
-        sendClientMessage(clientSocket, {
-          type: "hume.connection.closed",
-          code,
-          reason: reason.toString(),
-        });
-      });
-
-      nextSocket.on("error", (error) => {
-        const message = error.message || "Hume WebSocket connection failed.";
-        sendClientMessage(clientSocket, {
-          type: "hume.error",
-          error: message,
-        });
-        reject(error);
-      });
-    });
-  }
-
-  clientSocket.on("message", async (rawData) => {
-    let message;
-    try {
-      message = JSON.parse(rawData.toString());
-    } catch (error) {
-      sendClientMessage(clientSocket, {
-        type: "hume.error",
-        error: `Invalid JSON sent to Hume proxy: ${error.message}`,
-      });
-      return;
-    }
-
-    if (message.type === "close") {
-      closeHumeSocket();
-      return;
-    }
-
-    if (message.type !== "speak") {
-      sendClientMessage(clientSocket, {
-        type: "hume.error",
-        error: "Unsupported Hume proxy message type.",
-      });
-      return;
-    }
-
-    const text = typeof message.text === "string" ? message.text.trim() : "";
-    const voiceGender = message.voiceGender;
-    const missingConfigError = getMissingHumeConfigError(voiceGender);
-
-    if (missingConfigError) {
-      sendClientMessage(clientSocket, {
-        type: "hume.error",
-        error: missingConfigError,
-        status: allowedVoiceGenders.includes(voiceGender) ? 500 : 400,
-      });
-      return;
-    }
-
-    if (!text) {
-      sendClientMessage(clientSocket, {
-        type: "hume.error",
-        error: "Missing text for Hume Octave TTS.",
-        status: 400,
-      });
-      return;
-    }
-
-    try {
-      const socket = await connectToHume();
-      const voiceId = HUME_VOICE_IDS[voiceGender];
-      const actingInstruction = buildHumeActingInstruction(message);
-
-      if (lastVoiceGender && lastVoiceGender !== voiceGender) {
-        socket.send(JSON.stringify({ flush: true }));
-      }
-      lastVoiceGender = voiceGender;
-
-      socket.send(JSON.stringify({
-        text,
-        voice: { id: voiceId },
-        description: actingInstruction,
-      }));
-      socket.send(JSON.stringify({ flush: true }));
-
-      sendClientMessage(clientSocket, {
-        type: "hume.request.accepted",
-        voiceGender,
-        maskedVoiceId: maskVoiceId(voiceId),
-        text,
-        actingInstruction,
-        lipSync: createLipSyncPlaceholder().lipSync,
-      });
-    } catch (error) {
-      sendClientMessage(clientSocket, {
-        type: "hume.error",
-        error: error.message || "Hume WebSocket connection failed.",
-      });
-    }
-  });
-
-  clientSocket.on("close", closeHumeSocket);
-  clientSocket.on("error", closeHumeSocket);
-});
-
 server.on("upgrade", (request, socket, head) => {
   const { pathname } = new URL(request.url, `http://${request.headers.host}`);
 
-  if (pathname !== "/api/hume/tts-stream") {
+  if (pathname !== "/api/tts/stream") {
     socket.destroy();
     return;
   }
 
-  humeProxyServer.handleUpgrade(request, socket, head, (ws) => {
-    humeProxyServer.emit("connection", ws, request);
+  ttsProxyServer.handleUpgrade(request, socket, head, (ws) => {
+    ttsProxyServer.emit("connection", ws, request);
   });
 });
 
