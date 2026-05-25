@@ -3,6 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
+import { conversationsRouter } from "./conversations.js";
 import { createTtsProxyServer } from "./tts/index.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +61,7 @@ const sampleAvatarTool = {
 };
 
 app.use(express.json({ limit: "1mb" }));
+app.use("/api/conversations", conversationsRouter);
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });

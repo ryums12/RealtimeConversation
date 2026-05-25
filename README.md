@@ -17,6 +17,7 @@ npm install
 ```bash
 OPENAI_API_KEY=sk-your-real-key
 PORT=3001
+DATABASE_URL=postgresql://user:password@host:5432/database
 TTS_PROVIDER=elevenlabs
 ELEVENLABS_API_KEY=replace_with_elevenlabs_api_key
 ELEVENLABS_MALE_VOICE_ID=replace_with_elevenlabs_male_voice_id
@@ -28,6 +29,14 @@ HUME_MALE_VOICE_ID=replace_with_hume_male_voice_id
 HUME_FEMALE_VOICE_ID=replace_with_hume_female_voice_id
 HUME_TTS_VERSION=2
 HUME_TTS_WEBSOCKET_URL=wss://api.hume.ai/v0/tts/stream/input
+```
+
+For Supabase, use the PostgreSQL connection string as `DATABASE_URL`. The frontend never receives the database URL, Supabase keys, or service role credentials.
+
+Create the conversation tables with:
+
+```bash
+psql "$DATABASE_URL" -f backend/conversations.schema.sql
 ```
 
 ## Run
@@ -51,12 +60,17 @@ http://localhost:5173
 3. Click `Start Conversation`.
 4. Allow microphone access.
 5. Speak naturally. OpenAI Realtime extracts assistant text, sentence chunks are sent to the active TTS provider, and the browser plays provider audio chunks in order.
-6. Click `Stop / Reset` to stop mic capture, close WebRTC, close the TTS proxy socket, and reset playback.
+6. Click `Stop / Reset` to stop mic capture, close WebRTC, close the TTS proxy socket, and end the saved conversation.
+7. Use `Analyze Conversation` or `Cancel / Delete Conversation` in the Conversation Analysis section.
 
 ## Files
 
-- `src/main.jsx` - React UI, browser WebRTC setup, Realtime event parsing, TTS text streaming, audio chunk playback, and debug inspector.
+- `src/main.jsx` - React UI, browser WebRTC setup, Realtime event parsing, TTS text streaming, and audio chunk playback.
+- `src/ConversationAnalysisPanel.jsx` - Reusable conversation analysis controls and result display.
+- `src/DebugLogPanel.jsx` - Preserved reusable debug inspector/log display component.
 - `backend/server.js` - Express backend that negotiates OpenAI Realtime sessions and upgrades the generic TTS WebSocket proxy.
+- `backend/conversations.js` - Conversation persistence, analysis, and delete API routes.
+- `backend/conversations.schema.sql` - PostgreSQL/Supabase table schema for saved conversations.
 - `backend/tts/` - TTS provider abstraction, ElevenLabs provider, and preserved Hume Octave provider.
 - `backend/.env.example` - environment variable template.
 - `vite.config.js` - Vite dev server proxy from `/api/session` and `/api/tts` to the backend.
@@ -65,7 +79,7 @@ http://localhost:5173
 
 - OpenAI Realtime is configured for text output and any Realtime audio track is ignored in the browser.
 - ElevenLabs is the default TTS voice output path. Set `TTS_PROVIDER=hume_octave` to use the preserved Hume Octave provider.
-- The debug inspector keeps AI speech text, tool/function call JSON, TTS state, Realtime events, and lip-sync placeholder JSON.
+- The debug inspector component is preserved for reuse, but it is not currently mounted on the main page.
 - Lip-sync data is stored as a placeholder structure. No avatar rendering or viseme animation is implemented yet.
 - Use a recent Node.js version with built-in `fetch` and `FormData` support. Node.js 20 or newer is recommended.
 - Browser microphone access requires `localhost` or HTTPS.

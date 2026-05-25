@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { ConversationAnalysisPanel } from "./ConversationAnalysisPanel.jsx";
 import "./styles.css";
 
 const MAX_EVENT_LOG_ITEMS = 150;
@@ -32,6 +33,19 @@ const TTS_LIP_SYNC_PLACEHOLDER = {
   phonemeTimestamps: [],
   visemes: [],
 };
+
+async function readApiError(response, fallbackMessage) {
+  const body = await response.text();
+
+  if (!body) return fallbackMessage;
+
+  try {
+    const parsed = JSON.parse(body);
+    return parsed.error || parsed.message || fallbackMessage;
+  } catch {
+    return body || fallbackMessage;
+  }
+}
 
 function safeJsonParse(rawString) {
   if (!rawString) {
@@ -259,6 +273,13 @@ function App() {
   const [enableSampleTool, setEnableSampleTool] = useState(false);
   const [voiceGender, setVoiceGender] = useState("male");
   const [enableResponseLogs] = useState(true);
+  const [conversationId, setConversationId] = useState("");
+  const [conversationStatus, setConversationStatus] = useState("idle");
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [analysisError, setAnalysisError] = useState("");
+  const [analysisStatusMessage, setAnalysisStatusMessage] = useState("");
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isDeletingConversation, setIsDeletingConversation] = useState(false);
   const [status, setStatus] = useState("Idle");
   const [TTSStatus, setTTSStatus] = useState("TTS idle");
   const [TTSError, setTTSError] = useState("");
@@ -295,6 +316,8 @@ function App() {
   const TTSAudioPlayingRef = useRef(false);
   const TTSCurrentAudioRef = useRef(null);
   const voiceGenderRef = useRef(voiceGender);
+  const conversationIdRef = useRef(conversationId);
+  const conversationStatusRef = useRef(conversationStatus);
   const enableResponseLogsRef = useRef(enableResponseLogs);
   const currentSpeechBufferRef = useRef("");
   const sentenceSpeechBufferRef = useRef("");
@@ -324,6 +347,14 @@ function App() {
     enableResponseLogsRef.current = enableResponseLogs;
   }, [enableResponseLogs]);
 
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+  }, [conversationId]);
+
+  useEffect(() => {
+    conversationStatusRef.current = conversationStatus;
+  }, [conversationStatus]);
+
   function appendLog(type, preview) {
     if (!enableResponseLogsRef.current) return;
 
@@ -340,6 +371,88 @@ function App() {
   function appendRealtimeEvent(event) {
     if (!isRelevantRealtimeEvent(event)) return;
     appendLog(event.type, compactEventPreview(event));
+  }
+
+  async function createConversationRecord() {
+    try {
+      const response = await fetch("/api/conversations", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          scenario,
+          metadata: {
+            enableSampleTool,
+            voiceGender,
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Could not create a saved conversation."));
+      }
+
+      const payload = await response.json();
+      setConversationId(payload.conversationId || "");
+      conversationIdRef.current = payload.conversationId || "";
+      appendLog("conversation.created", { conversationId: payload.conversationId });
+      return payload.conversationId || "";
+    } catch (error) {
+      const message = error.message || "Could not create a saved conversation.";
+      setAnalysisError(`${message} Conversation analysis will be unavailable until a conversation is saved.`);
+      appendLog("conversation.create.error", { message });
+      return "";
+    }
+  }
+
+  async function persistConversationMessage(role, content, metadata = {}) {
+    const activeConversationId = conversationIdRef.current;
+    if (!activeConversationId || !content?.trim()) return;
+
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(activeConversationId)}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          role,
+          content,
+          metadata,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Could not save conversation message."));
+      }
+    } catch (error) {
+      appendLog("conversation.message.save.error", {
+        role,
+        message: error.message || "Could not save conversation message.",
+      });
+    }
+  }
+
+  async function markConversationEnded() {
+    const activeConversationId = conversationIdRef.current;
+    if (!activeConversationId) return;
+
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(activeConversationId)}/end`, {
+        method: "PATCH",
+      });
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Could not mark conversation as ended."));
+      }
+
+      appendLog("conversation.ended", { conversationId: activeConversationId });
+    } catch (error) {
+      const message = error.message || "Could not mark conversation as ended.";
+      setAnalysisError(`${message} Analysis may be unavailable until the saved conversation is ended.`);
+      appendLog("conversation.end.error", { message });
+    }
   }
 
   function sendRealtimeClientEvent(event) {
@@ -468,6 +581,10 @@ function App() {
       item_id: itemId,
       source_event: event.type,
     });
+    persistConversationMessage("user", transcript, {
+      item_id: itemId,
+      source_event: event.type,
+    });
   }
 
   function updateSpeechText(deltaOrText) {
@@ -493,6 +610,9 @@ function App() {
     setCurrentSpeechText("");
     setFinalSpeechText(completedText);
     appendLog("ai_response", { label: "AI", text: completedText });
+    persistConversationMessage("assistant", completedText, {
+      source: "openai.realtime",
+    });
 
     const finalChunks = sentSentenceChunksRef.current.size > 0
       ? [sentenceSpeechBufferRef.current.trim()].filter(Boolean)
@@ -963,6 +1083,13 @@ function App() {
     if (isRunning) return;
 
     try {
+      setConversationStatus("active");
+      setConversationId("");
+      conversationIdRef.current = "";
+      setAnalysisResult(null);
+      setAnalysisError("");
+      setAnalysisStatusMessage("");
+      await createConversationRecord();
       setStatus("Requesting microphone...");
 
       // The browser captures mic audio. WebRTC sends it directly over the peer connection.
@@ -1062,12 +1189,12 @@ function App() {
       setStatus("Connected. Start speaking.");
     } catch (error) {
       console.error(error);
-      stopConversation();
+      await stopConversation({ markEnded: false, resetConversation: true });
       setStatus(`Error: ${error.message || "Could not start conversation"}`);
     }
   }
 
-  function stopConversation() {
+  async function stopConversation({ markEnded = true, resetConversation = false } = {}) {
     // Stop microphone capture.
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
@@ -1094,8 +1221,131 @@ function App() {
     finalizedUserTranscriptKeysRef.current = new Set();
 
     setIsRunning(false);
-    setStatus("Idle");
+    if (resetConversation) {
+      setConversationId("");
+      conversationIdRef.current = "";
+      setConversationStatus("idle");
+      setAnalysisResult(null);
+      setAnalysisError("");
+      setAnalysisStatusMessage("");
+      setStatus("Idle");
+    } else if (markEnded && conversationStatusRef.current === "active") {
+      setConversationStatus("ended");
+      setStatus("Conversation ended.");
+      await markConversationEnded();
+    } else {
+      setStatus("Idle");
+    }
     setCurrentUserSpeechText("");
+  }
+
+  async function analyzeConversation() {
+    if (isAnalyzing) return;
+
+    if (conversationStatus !== "ended") {
+      setAnalysisError("End the conversation before requesting analysis.");
+      return;
+    }
+
+    if (!conversationId) {
+      setAnalysisError("No saved conversation ID exists for this conversation.");
+      return;
+    }
+
+    if (!window.confirm("Do you want to analyze this conversation?")) return;
+
+    setIsAnalyzing(true);
+    setConversationStatus("analyzing");
+    setAnalysisError("");
+    setAnalysisStatusMessage("");
+
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}/analyze`, {
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Conversation analysis failed."));
+      }
+
+      const payload = await response.json();
+      const nextAnalysisResult = payload.analysis || payload.result || "";
+
+      if (!nextAnalysisResult || (typeof nextAnalysisResult === "object" && Object.keys(nextAnalysisResult).length === 0)) {
+        throw new Error("Analysis completed, but the result was empty.");
+      }
+
+      setAnalysisResult(nextAnalysisResult);
+      setAnalysisStatusMessage("Conversation analysis complete.");
+      appendLog("conversation.analysis.completed", { conversationId });
+    } catch (error) {
+      setAnalysisError(error.message || "Conversation analysis failed.");
+      appendLog("conversation.analysis.error", {
+        conversationId,
+        message: error.message || "Conversation analysis failed.",
+      });
+    } finally {
+      setIsAnalyzing(false);
+      setConversationStatus("ended");
+    }
+  }
+
+  async function deleteConversation() {
+    if (isDeletingConversation) return;
+
+    if (conversationStatus !== "ended") {
+      setAnalysisError("End the conversation before deleting its saved data.");
+      return;
+    }
+
+    if (!window.confirm("Are you sure you want to cancel this conversation and delete its saved data?")) return;
+
+    if (!conversationId) {
+      setConversationId("");
+      conversationIdRef.current = "";
+      setConversationStatus("idle");
+      setAnalysisResult(null);
+      setAnalysisError("");
+      setAnalysisStatusMessage("Conversation state cleared.");
+      setEventLog([]);
+      setStatus("Idle");
+      return;
+    }
+
+    setIsDeletingConversation(true);
+    setAnalysisError("");
+    setAnalysisStatusMessage("");
+
+    try {
+      const response = await fetch(`/api/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "DELETE",
+      });
+
+      if (!response.ok) {
+        throw new Error(await readApiError(response, "Could not delete conversation."));
+      }
+
+      setConversationId("");
+      conversationIdRef.current = "";
+      setConversationStatus("idle");
+      setAnalysisResult(null);
+      setAnalysisStatusMessage("Conversation deleted.");
+      setEventLog([]);
+      setSpeechHistory([]);
+      setToolCalls([]);
+      setFinalUserSpeechText("");
+      setFinalSpeechText("");
+      setCurrentSpeechText("");
+      setStatus("Idle");
+    } catch (error) {
+      setAnalysisError(error.message || "Could not delete conversation.");
+      appendLog("conversation.delete.error", {
+        conversationId,
+        message: error.message || "Could not delete conversation.",
+      });
+    } finally {
+      setIsDeletingConversation(false);
+    }
   }
 
   return (
@@ -1145,6 +1395,18 @@ function App() {
         <p className="status">TTS: {TTSStatus}</p>
         {TTSError && <p className="error-message">{TTSError}</p>}
       </section>
+
+      <ConversationAnalysisPanel
+        analysisError={analysisError}
+        analysisResult={analysisResult}
+        analysisStatusMessage={analysisStatusMessage}
+        conversationId={conversationId}
+        conversationStatus={conversationStatus}
+        isAnalyzing={isAnalyzing}
+        isDeleting={isDeletingConversation}
+        onAnalyze={analyzeConversation}
+        onDelete={deleteConversation}
+      />
 
       <audio ref={remoteAudioRef} autoPlay playsInline />
     </main>
