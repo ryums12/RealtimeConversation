@@ -88,13 +88,6 @@ textarea {
   color: #172026;
 }
 
-.settings-group {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px 16px;
-}
-
 button {
   min-height: 40px;
   padding: 0 14px;
