@@ -14,7 +14,7 @@ function renderList(value, emptyText) {
 
 function renderAnalysisResult(result) {
   if (!result) {
-    return <p className="empty-state">No analysis result yet.</p>;
+    return <p className="empty-state">분석 결과가 없습니다.</p>;
   }
 
   if (typeof result === "string") {
@@ -91,22 +91,22 @@ export function ConversationAnalysisPanel({
     <section className="analysis-panel" aria-label="Conversation Analysis">
       <div className="section-heading">
         <div>
-          <h2>Conversation Analysis</h2>
+          <h2>대화 분석 결과</h2>
           <p>Status: {conversationStatus}</p>
         </div>
       </div>
 
       <div className="controls">
         <button onClick={onAnalyze} disabled={!canAct} type="button">
-          Analyze Conversation
+          대화 분석
         </button>
         <button className="secondary-button" onClick={onDelete} disabled={!canAct} type="button">
-          Cancel / Delete Conversation
+          취소 / 대화 삭제
         </button>
       </div>
 
       {!conversationId && conversationStatus === "ended" && (
-        <p className="error-message">No saved conversation ID exists for this conversation.</p>
+        <p className="error-message">이 대화에 대한 저장된 ID가 없습니다.</p>
       )}
       {analysisStatusMessage && <p className="success-message">{analysisStatusMessage}</p>}
       {analysisError && <p className="error-message">{analysisError}</p>}
@@ -117,7 +117,7 @@ export function ConversationAnalysisPanel({
         <div className="modal-backdrop" role="alert" aria-live="assertive">
           <div className="modal">
             <div className="loading-spinner" aria-hidden="true" />
-            <p>Analyzing conversation...</p>
+            <p>대화 분석 중...</p>
           </div>
         </div>
       )}

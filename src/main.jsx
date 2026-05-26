@@ -21,8 +21,8 @@ const TURN_LIFECYCLE_EVENT_TYPES = new Set([
   "response.done",
 ]);
 const VOICE_OPTIONS = [
-  { value: "male", label: "Male" },
-  { value: "female", label: "Female" },
+  { value: "male", label: "남성" },
+  { value: "female", label: "여성" },
 ];
 const TTS_LIP_SYNC_PLACEHOLDER = {
   enabled: false,
@@ -1351,7 +1351,7 @@ function App() {
   return (
     <main className="app">
       <section className="panel">
-        <label htmlFor="scenario">Conversation scenario</label>
+        <label htmlFor="scenario">대화 시나리오 설정</label>
         <textarea
           id="scenario"
           value={scenario}
@@ -1359,18 +1359,8 @@ function App() {
           disabled={isRunning}
         />
 
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={enableSampleTool}
-            onChange={(event) => setEnableSampleTool(event.target.checked)}
-            disabled={isRunning}
-          />
-          Enable sample avatar tool schema
-        </label>
-
         <div className="settings-row">
-          <label htmlFor="voice-gender">Voice</label>
+          <label htmlFor="voice-gender">성별 선택</label>
           <select
             id="voice-gender"
             value={voiceGender}
@@ -1386,9 +1376,9 @@ function App() {
 
         <div className="controls">
           <button onClick={startConversation} disabled={isRunning}>
-            Start Conversation
+            대화 시작
           </button>
-          <button onClick={stopConversation}>Stop / Reset</button>
+          <button onClick={stopConversation}>종료</button>
         </div>
 
         <p className="status">Status: {status}</p>
